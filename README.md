@@ -7,7 +7,8 @@ Serve principalmente para criar zonas onde **não chove** (flag `NO_RAIN`), mas
 também edita qualquer outro atributo de cull zone (sem polícia, zona militar,
 áudio de interior, menos carros/pedestres...).
 
-* GUI in-game (Moon ImGui) com lista de zonas e edição de tudo
+* GUI in-game (Moon ImGui), aberta segurando `C` + `L` e fechada no `X`, com
+  todas as ações em botões, lista de zonas e edição de tudo
 * Visualização 3D em tempo real: a caixa da zona é desenhada no mundo, com nome,
   distância, flags e destaque quando o jogador está dentro
 * Botões que salvam a posição (do jogador, do centro, dos tamanhos, do Z...)
@@ -38,28 +39,47 @@ também edita qualquer outro atributo de cull zone (sem polícia, zona militar,
 ## Instalação
 
 1. Copie `moonloader/CullZoneCreator.lua` para `GTA San Andreas\moonloader\`.
-2. Entre no jogo e carregue um save. O menu abre com **F7**.
+2. Entre no jogo e carregue um save. **Segure `C` + `L`** para abrir o menu.
 
 ## Uso
 
-| Tecla | Ação |
+| Ação | Como |
 |---|---|
-| `F7` | abre/fecha o menu |
-| `F8` | cria uma zona na posição do jogador |
-| `F9` | liga/desliga o **live apply** (aplica no jogo na hora) |
-| `F10` | liga/desliga o overlay 3D + HUD |
-| `F11` | exporta (IPL ou pacote ModLoader) |
+| **Abrir o menu** | **segure `C` + `L`** (as duas juntas) |
+| **Fechar o menu** | **clique no `X`** no canto superior direito da janela |
+
+Não há tecla para fechar: o menu fecha no `X` (ou no botão **"Fechar menu (X)"**
+na seção *Ações*). Em **Configurações** dá para trocar as duas teclas do atalho
+(botões "Trocar 1ª/2ª tecla" — aperte a tecla desejada, `ESC` cancela), voltar
+para `C + L`, ou desligar o atalho.
+
+Tudo o que o script faz está em botões dentro do menu, na seção **Ações**:
+
+| Botão | O que faz |
+|---|---|
+| **Nova zona no player** | cria uma zona na posição atual do jogador |
+| **Aplicar no jogo: ON/OFF** | liga/desliga o live apply (efeito na hora) |
+| **Overlay 3D + HUD: ON/OFF** | liga/desliga a visualização das zonas e o painel |
+| **Exportar IPL** | grava o arquivo `.ipl` |
+| **Pacote ModLoader** | gera `cull.ipl` + `gta.dat` prontos |
+| **Ler zonas do jogo** | lê as cull zones que o jogo já tem carregadas |
+| **Salvar config** | salva zonas e preferências |
+| **Fechar menu (X)** | fecha a janela |
+
+(Opcional: em *Configurações → Atalhos extras* você pode ligar teclas como `F8`
+para criar zona sem abrir o menu. Por padrão ficam todas desligadas.)
 
 Fluxo típico para uma zona sem chuva:
 
 1. Vá até o lugar (de carro, de helicóptero...).
-2. `F8` cria a zona; no menu ajuste **centro**, **tamanho** (meia largura X e
-   meia altura Y, em metros) e **altura** (`Bottom`/`Top`, Z absoluto do mundo).
+2. Abra o menu (`C` + `L`) e clique em **Nova zona no player**; ajuste **centro**,
+   **tamanho** (meia largura X e meia altura Y, em metros) e **altura**
+   (`Bottom`/`Top`, Z absoluto do mundo).
 3. Marque `NoRain` (ou clique em "Sem chuva").
-4. Com "Aplicar no jogo" ligado, ande para dentro e para fora: o HUD mostra
-   `SEM CHUVA` quando o efeito está ativo e a caixa fica verde quando você está
-   dentro da zona.
-5. Exporte:
+4. Com "Aplicar no jogo" ligado, feche o menu e ande para dentro e para fora: o
+   overlay/HUD mostra `SEM CHUVA` quando o efeito está ativo e a caixa fica verde
+   quando você está dentro da zona.
+5. Abra o menu de novo e exporte:
    * **Exportar IPL** → gera `modloader\CullZoneCreator\cull.ipl`;
    * **Pacote ModLoader** → gera também o `gta.dat` e um `LEIA-ME.txt`, já
      pronto para o ModLoader ler as zonas sozinho.

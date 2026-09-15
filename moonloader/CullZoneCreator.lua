@@ -14,18 +14,25 @@
 --------------------------------------------------------------------------------
   COMO USAR
 --------------------------------------------------------------------------------
-    F7  = abre/fecha o menu
-    F8  = cria uma zona na posicao atual do jogador
-    F9  = liga/desliga "aplicar no jogo" (live apply, escreve na memoria)
-    F10 = liga/desliga overlay 3D + HUD
-    F11 = exporta o IPL (ou o pacote ModLoader)
+    ABRIR O MENU  : segure C + L (as duas juntas)
+    FECHAR O MENU : clique no X no canto superior direito da janela
 
-    1) Vá ate o lugar (de carro, helicoptero...).
-    2) F8 cria a zona; no menu ajuste centro, tamanho (metros) e altura (Z).
-    3) Marque o flag NO_RAIN. Com o live apply ligado, o efeito é imediato:
-       ande para dentro e para fora para conferir no HUD ("SEM CHUVA").
-    4) Exporte o .ipl e registre no data\gta.dat, ou use "Pacote ModLoader"
-       (gera cull.ipl + gta.dat prontos para copiar na pasta modloader).
+    Dentro do menu esta tudo, em botoes:
+      - Nova zona no player (salva a posicao atual)
+      - Aplicar no jogo (live apply)  -> efeito na hora, sem reiniciar
+      - Overlay 3D + HUD
+      - Exportar IPL / Pacote ModLoader
+      - Ler as cull zones que o jogo ja tem e copiar como base
+      - Salvar/carregar config, trocar as teclas do atalho...
+
+    1) Va ate o lugar (de carro, helicoptero...).
+    2) Abra o menu (C + L) e clique em "Nova zona no player".
+    3) Ajuste centro, tamanho (metros) e altura (Z) e marque o flag NO_RAIN.
+       Com o live apply ligado o efeito e imediato: ande para dentro e para
+       fora e veja no HUD o aviso "SEM CHUVA".
+    4) Clique em "Exportar IPL" (ou "Pacote ModLoader") e registre o .ipl no
+       data\gta.dat - ou copie a pasta modloader\CullZoneCreator que o script
+       gera com cull.ipl + gta.dat prontos.
 
 --------------------------------------------------------------------------------
   FORMATO IPL - SECAO CULL
@@ -75,6 +82,7 @@ local ok_imgui, imgui = pcall(require, 'imgui')          -- Moon ImGui (obrigato
 local ok_mad, mad = pcall(require, 'MoonAdditions')      -- opcional (preenchimento)
 local ok_vkeys, vkeys = pcall(require, 'vkeys')
 local ok_moon, moonlib = pcall(require, 'moonloader')
+local ok_wm, wm = pcall(require, 'windows.message')
 
 if not ok_vkeys or not vkeys then
     -- teclas usadas quando o modulo 'vkeys' nao esta disponivel
@@ -82,7 +90,39 @@ if not ok_vkeys or not vkeys then
         VK_F1 = 0x70, VK_F2 = 0x71, VK_F3 = 0x72, VK_F4 = 0x73, VK_F5 = 0x74,
         VK_F6 = 0x75, VK_F7 = 0x76, VK_F8 = 0x77, VK_F9 = 0x78, VK_F10 = 0x79,
         VK_F11 = 0x7A, VK_F12 = 0x7B, VK_INSERT = 0x2D, VK_DELETE = 0x2E,
+        VK_C = 0x43, VK_L = 0x4C, VK_A = 0x41, VK_M = 0x4D,
     }
+end
+
+-- mensagens do Windows usadas para capturar a tecla do atalho
+local WM_KEYDOWN = (ok_wm and wm and wm.WM_KEYDOWN) or 0x100
+local WM_SYSKEYDOWN = (ok_wm and wm and wm.WM_SYSKEYDOWN) or 0x104
+
+-- nome das teclas (para mostrar no menu/HUD)
+local VK_NAMES = {}
+for i = 0, 25 do VK_NAMES[0x41 + i] = string.char(65 + i) end
+for i = 0, 9 do VK_NAMES[0x30 + i] = tostring(i) end
+for i = 1, 12 do VK_NAMES[0x70 + i - 1] = 'F' .. i end
+VK_NAMES[0x20] = 'Espaco'
+VK_NAMES[0x0D] = 'Enter'
+VK_NAMES[0x09] = 'Tab'
+VK_NAMES[0x10] = 'Shift'
+VK_NAMES[0x11] = 'Ctrl'
+VK_NAMES[0x12] = 'Alt'
+VK_NAMES[0x1B] = 'ESC'
+VK_NAMES[0x25] = 'Esquerda'
+VK_NAMES[0x26] = 'Cima'
+VK_NAMES[0x27] = 'Direita'
+VK_NAMES[0x28] = 'Baixo'
+VK_NAMES[0x2D] = 'Insert'
+VK_NAMES[0x2E] = 'Delete'
+VK_NAMES[0x24] = 'Home'
+VK_NAMES[0x23] = 'End'
+VK_NAMES[0x2C] = 'Print'
+
+local function key_name(vk)
+    if not vk or vk == 0 then return 'nenhuma' end
+    return VK_NAMES[vk] or ('tecla ' .. tostring(vk))
 end
 
 local bit = bit or require 'bit'
@@ -555,7 +595,14 @@ local state = {
     dry_run = false,
     render_in_menu = false,
     auto_load_save = true,
-    keys = { menu = vkeys.VK_F7, new_zone = vkeys.VK_F8, live = vkeys.VK_F9, overlay = vkeys.VK_F10, export = vkeys.VK_F11 },
+    -- atalho principal: segurar as duas teclas abre o menu (padrao C + L)
+    open_combo = { vkeys.VK_C or 0x43, vkeys.VK_L or 0x4C },
+    open_combo_enabled = true,
+    combo_was_down = false,
+    lock_player = false,          -- trava os controles com o menu aberto
+    capture = nil,                -- 'open1' / 'open2' enquanto escolhe a tecla
+    -- atalhos extras (opcionais; por padrao nenhum, o menu tem tudo)
+    keys = { menu = 0, new_zone = 0, live = 0, overlay = 0, export = 0 },
     last_msg = '',
     last_msg_color = { r = 220, g = 220, b = 220 },
 }
@@ -930,7 +977,7 @@ local function export_modloader_package(dir)
         '',
         'Observacao: as cull zones entram em vigor quando o jogo carrega o mapa,',
         'ou seja: iniciar o jogo (ou sair e entrar de novo no single player).',
-        'Para testar na hora, use o live apply do script (tecla F9).',
+        'Para testar na hora, use o live apply do script (botao "Aplicar no jogo").',
         '',
     }, '\r\n')
     write_file(join(dir, 'LEIA-ME.txt'), readme)
@@ -1227,7 +1274,7 @@ local function build_hud()
             inside and 'VOCE ESTA DENTRO' or 'fora', dist), inside and 140 or 220, 220, inside and 140 or 220)
         L('Flags: ' .. flag_list(sel.flags), 180, 220, 255)
     else
-        L('Sem zonas - F8 cria uma na sua posicao', 255, 190, 90)
+        L('Sem zonas - crie uma em "Acoes > Nova zona no player"', 255, 190, 90)
     end
 
     if st then
@@ -1237,7 +1284,8 @@ local function build_hud()
             WEATHER_NAMES[st.weather] or '?', st.weather, st.attr_count, st.mirror_count), 200, 220, 255)
     end
 
-    L(string.format('Zonas do script: %d   F7 menu  F8 nova  F9 live  F10 overlay', #state.zones), 180, 180, 180)
+    L(string.format('Zonas do script: %d   [%s + %s] abre o menu (fecha no X)',
+        #state.zones, key_name(state.open_combo[1]), key_name(state.open_combo[2])), 180, 180, 180)
 
     local lh = text_height() + 3
     local width = 0
@@ -1438,7 +1486,7 @@ local function ui_header()
     local hud = checkbox('hud', 'HUD', state.hud)
     if hud ~= nil then state.hud = hud end
     imgui.SameLine()
-    if button('Nova zona (F8)', 130) then new_zone_at_player() end
+    if button('Nova zona no player', 150) then new_zone_at_player() end
 
     if not Game.ok then
         imgui.TextColored(imgui.ImVec4(1.0, 0.65, 0.30, 1.0),
@@ -1515,11 +1563,49 @@ local function ui_flags(z)
     imgui.Text(string.format('= 0x%04X (%s)', bit.band(ctrunc(z.flags), FLAG_ALL), flag_list(z.flags)))
 end
 
+-- tudo o que antes era tecla agora e botao aqui dentro
+local function ui_actions()
+    imgui.Text('Acoes')
+    -- linha 1: criar zona e ligar/desligar o que aparece na tela
+    if button('Nova zona no player', 170) then new_zone_at_player() end
+    imgui.SameLine()
+    if button('Aplicar no jogo: ' .. (state.live_apply and 'ON' or 'OFF'), 180) then
+        state.live_apply = not state.live_apply
+        MarkLiveDirty()
+        msg('Aplicar no jogo: ' .. (state.live_apply and 'LIGADO' or 'DESLIGADO'), 140, 220, 255)
+    end
+    imgui.SameLine()
+    if button('Overlay 3D + HUD: ' .. (state.overlays and 'ON' or 'OFF'), 180) then
+        state.overlays = not state.overlays
+        state.hud = state.overlays
+        msg('Overlay 3D + HUD: ' .. (state.overlays and 'LIGADO' or 'DESLIGADO'), 140, 220, 255)
+    end
+    -- linha 2: exportar / importar / salvar / fechar
+    if button('Exportar IPL', 120) then
+        export_ipl(ui.export_path or EXPORT_FILE)
+    end
+    imgui.SameLine()
+    if button('Pacote ModLoader', 140) then
+        export_modloader_package(dirname(ui.export_path or EXPORT_FILE or '') or EXPORT_DIR)
+    end
+    imgui.SameLine()
+    if button('Ler zonas do jogo', 140) then
+        local n = scan_game_zones(state.player and state.player.x, state.player and state.player.y)
+        msg(string.format('%d zona(s) lida(s) da memoria do jogo.', n), 140, 220, 255)
+    end
+    imgui.SameLine()
+    if button('Salvar config', 120) then save_config() end
+    imgui.SameLine()
+    if button('Fechar menu (X)', 140) then set_ui(false) end
+    imgui.Text('Abrir o menu: segure ' .. key_name(state.open_combo[1]) .. ' + ' ..
+        key_name(state.open_combo[2]) .. '  (configuravel em Configuracoes)')
+end
+
 local function ui_editor()
     local z = selected_zone()
     if not z then
         imgui.Text('Nenhuma zona na lista.')
-        if button('Criar zona na posicao do jogador (F8)', 300) then new_zone_at_player() end
+        if button('Criar zona na posicao do jogador', 300) then new_zone_at_player() end
         return
     end
 
@@ -1712,7 +1798,7 @@ local function ui_io()
         add_zone(z)
         msg('Zona de exemplo adicionada.', 140, 220, 255)
     end
-    imgui.TextWrapped('O jogo le o IPL ao carregar o mapa. Para testar na hora use o live apply (F9).')
+    imgui.TextWrapped('O jogo le o IPL ao carregar o mapa. Para testar na hora use "Aplicar no jogo".')
 end
 
 local function ui_game_zones()
@@ -1775,20 +1861,46 @@ local function ui_settings()
     end
 
     imgui.Separator()
-    imgui.Text('Teclas (clique para escolher)')
-    local key_names = { 'menu', 'new_zone', 'live', 'overlay', 'export' }
-    local labels = { menu = 'Menu', new_zone = 'Nova zona', live = 'Live apply', overlay = 'Overlay/HUD', export = 'Exportar' }
-    local vks = { { vkeys.VK_F1, 'F1' }, { vkeys.VK_F2, 'F2' }, { vkeys.VK_F3, 'F3' }, { vkeys.VK_F4, 'F4' },
-        { vkeys.VK_F5, 'F5' }, { vkeys.VK_F6, 'F6' }, { vkeys.VK_F7, 'F7' }, { vkeys.VK_F8, 'F8' },
-        { vkeys.VK_F9, 'F9' }, { vkeys.VK_F10, 'F10' }, { vkeys.VK_F11, 'F11' }, { vkeys.VK_F12, 'F12' } }
-    for _, key in ipairs(key_names) do
-        imgui.Text(labels[key] .. ':')
-        for _, vk in ipairs(vks) do
-            imgui.SameLine()
-            if imgui.Selectable(vk[2] .. '##k' .. key .. vk[1], state.keys[key] == vk[1]) then
-                state.keys[key] = vk[1]
+    imgui.Text('Atalho para abrir o menu (segurar as duas teclas)')
+    local combo_on = checkbox('open_combo_enabled', 'Usar o atalho', state.open_combo_enabled)
+    if combo_on ~= nil then state.open_combo_enabled = combo_on end
+    imgui.SameLine()
+    imgui.Text(string.format('   %s + %s', key_name(state.open_combo[1]), key_name(state.open_combo[2])))
+    if state.capture then
+        imgui.TextColored(imgui.ImVec4(1.0, 0.85, 0.3, 1.0), 'Pressione a tecla para ' ..
+            (state.capture == 'open1' and 'a 1a' or 'a 2a') .. ' tecla do atalho (ESC cancela)...')
+    else
+        if button('Trocar 1a tecla', 130) then state.capture = 'open1' end
+        imgui.SameLine()
+        if button('Trocar 2a tecla', 130) then state.capture = 'open2' end
+        imgui.SameLine()
+        if button('Voltar para C + L', 140) then
+            state.open_combo = { vkeys.VK_C or 0x43, vkeys.VK_L or 0x4C }
+            msg('Atalho do menu: segure C + L', 140, 220, 255)
+        end
+    end
+    imgui.TextWrapped('Para fechar o menu, clique no X da janela (ou no botao "Fechar menu" em Acoes).')
+
+    local lock = checkbox('lock_player', 'Travar os controles com o menu aberto', state.lock_player)
+    if lock ~= nil then state.lock_player = lock end
+
+    if imgui.CollapsingHeader('Atalhos extras (opcional - o menu ja tem tudo)') then
+        local key_names = { 'menu', 'new_zone', 'live', 'overlay', 'export' }
+        local labels = { menu = 'Menu', new_zone = 'Nova zona', live = 'Live apply', overlay = 'Overlay/HUD', export = 'Exportar' }
+        local vks = { { 0, 'Nenhuma' }, { vkeys.VK_F1, 'F1' }, { vkeys.VK_F2, 'F2' }, { vkeys.VK_F3, 'F3' },
+            { vkeys.VK_F4, 'F4' }, { vkeys.VK_F5, 'F5' }, { vkeys.VK_F6, 'F6' }, { vkeys.VK_F7, 'F7' },
+            { vkeys.VK_F8, 'F8' }, { vkeys.VK_F9, 'F9' }, { vkeys.VK_F10, 'F10' }, { vkeys.VK_F11, 'F11' },
+            { vkeys.VK_F12, 'F12' } }
+        for _, key in ipairs(key_names) do
+            imgui.Text(labels[key] .. ':')
+            for _, vk in ipairs(vks) do
+                imgui.SameLine()
+                if imgui.Selectable(vk[2] .. '##k' .. key .. vk[1], state.keys[key] == vk[1]) then
+                    state.keys[key] = vk[1]
+                end
             end
         end
+        imgui.TextWrapped('Ex.: F8 = nova zona, sem precisar abrir o menu.')
     end
 
     imgui.Separator()
@@ -1812,7 +1924,7 @@ local function ui_settings()
         MarkLiveDirty()
     end
     imgui.SameLine()
-    local ap = checkbox('auto_pack', 'F11 = pacote ModLoader', state.auto_pack_modloader)
+    local ap = checkbox('auto_pack', 'Atalho de exportar = pacote ModLoader', state.auto_pack_modloader)
     if ap ~= nil then state.auto_pack_modloader = ap end
     imgui.SameLine()
     local al = checkbox('auto_load', 'Carregar save ao iniciar', state.auto_load_save)
@@ -1833,10 +1945,12 @@ end
 
 local function ui_help()
     imgui.Separator()
-    imgui.TextWrapped('1) F8 cria uma zona na sua posicao. 2) Ajuste centro, tamanho e altura (Z).')
-    imgui.TextWrapped('3) Marque NO_RAIN para a zona nao ter chuva (nem helicoptero de policia).')
-    imgui.TextWrapped('4) Com "Aplicar no jogo" ligado o efeito vale na hora - ande para dentro/fora para conferir.')
-    imgui.TextWrapped('5) Exporte o .ipl (ou o Pacote ModLoader) e registre no data\\gta.dat.')
+    imgui.TextWrapped('ABRIR: segure ' .. key_name(state.open_combo[1]) .. ' + ' .. key_name(state.open_combo[2]) ..
+        '   |   FECHAR: clique no X da janela.')
+    imgui.TextWrapped('1) "Nova zona no player" cria a zona na sua posicao; ajuste centro, tamanho e altura (Z).')
+    imgui.TextWrapped('2) Marque NO_RAIN para a zona nao ter chuva (nem helicoptero de policia).')
+    imgui.TextWrapped('3) Com "Aplicar no jogo" ligado o efeito vale na hora - ande para dentro/fora para conferir.')
+    imgui.TextWrapped('4) Exporte o .ipl (ou o Pacote ModLoader) e registre no data\\gta.dat.')
     imgui.Separator()
     imgui.TextWrapped('O box da zona usa MEIO tamanho: 30 = 60x60 metros. Bottom/Top sao Z absolutos.')
     imgui.TextWrapped('Cull zone de IPL so vale quando o jogo carrega o mapa - o live apply e so para testar.')
@@ -1852,6 +1966,8 @@ local function build_ui()
     local open = imgui.Begin('Cull Zone Creator v' .. VERSION, ui.show)
     if open then
         ui_header()
+        imgui.Separator()
+        ui_actions()
         imgui.Separator()
         imgui.BeginChild('czc_editor', imgui.ImVec2(0, math.max(150, h - 380)), true)
         ui_editor()
@@ -1897,8 +2013,13 @@ function save_config(silent)
             render_in_menu = state.render_in_menu,
             auto_load_save = state.auto_load_save,
             dry_run = state.dry_run,
-            keys = state.keys,
+            open_combo = state.open_combo,
+            open_combo_enabled = state.open_combo_enabled,
+            lock_player = state.lock_player,
         },
+        -- 'hotkeys' (novo): os atalhos extras ficam separados para saves antigos
+        -- com F7/F8/... nao sobrescreverem o atalho C + L
+        hotkeys = state.keys,
         export_path = ui.export_path or EXPORT_FILE,
         import_path = ui.import_path,
         zones = state.zones,
@@ -1929,11 +2050,14 @@ function load_config(silent)
                 state[k] = v
             end
         end
-        if type(s.keys) == 'table' and type(state.keys) == 'table' then
-            for k, v in pairs(s.keys) do
-                if state.keys[k] ~= nil and type(v) == 'number' and v > 0 then state.keys[k] = v end
-            end
+    end
+    if type(data.hotkeys) == 'table' and type(state.keys) == 'table' then
+        for k, v in pairs(data.hotkeys) do
+            if state.keys[k] ~= nil and type(v) == 'number' and v >= 0 and v < 256 then state.keys[k] = v end
         end
+    end
+    if type(state.open_combo) ~= 'table' or #state.open_combo < 2 then
+        state.open_combo = { vkeys.VK_C or 0x43, vkeys.VK_L or 0x4C }
     end
     if type(data.zones) == 'table' and #data.zones > 0 then
         state.zones = {}
@@ -1951,9 +2075,37 @@ function load_config(silent)
 end
 
 --=============================================================================
+-- CAPTURA DA TECLA DO ATALHO (onWindowMessage)
+--=============================================================================
+local function handle_window_message(message, wparam)
+    if not state.capture then return end
+    if message ~= WM_KEYDOWN and message ~= WM_SYSKEYDOWN then return end
+    local vk = ctrunc(wparam)
+    if vk == 0x1B then
+        state.capture = nil
+        msg('Troca de tecla cancelada.', 255, 190, 120)
+    elseif vk == 0x10 or vk == 0x11 or vk == 0x12 then
+        return   -- Shift/Ctrl/Alt sozinhos nao valem como tecla do atalho
+    else
+        local which = state.capture
+        state.capture = nil
+        if which == 'open1' then
+            state.open_combo[1] = vk
+        elseif which == 'open2' then
+            state.open_combo[2] = vk
+        end
+        state.combo_was_down = true   -- evita abrir o menu com a tecla recem-escolhida
+        msg(string.format('Atalho do menu: segure %s + %s', key_name(state.open_combo[1]),
+            key_name(state.open_combo[2])), 140, 220, 255)
+    end
+    if type(consumeWindowMessage) == 'function' then pcall(consumeWindowMessage, true, true) end
+end
+
+--=============================================================================
 -- LOOP PRINCIPAL
 --=============================================================================
 local function key_just_pressed(vk)
+    if not vk or vk == 0 then return false end
     if type(isKeyJustPressed) == 'function' then
         local ok, res = pcall(isKeyJustPressed, vk)
         if ok then return res end
@@ -1963,6 +2115,16 @@ local function key_just_pressed(vk)
         if ok then return res end
     end
     return false
+end
+
+-- tecla esta sendo SEGURADA agora
+local function key_held(vk)
+    if not vk or vk == 0 then return false end
+    if type(isKeyDown) == 'function' then
+        local ok, res = pcall(isKeyDown, vk)
+        if ok then return res end
+    end
+    return key_just_pressed(vk)
 end
 
 local function update_player()
@@ -1978,11 +2140,42 @@ local function update_player()
     state.player = nil
 end
 
-local function toggle_ui()
-    state.ui_show = not state.ui_show
-    if ui.show then ui.show.v = state.ui_show end
+local function set_ui(show)
+    show = show and true or false
+    state.ui_show = show
+    if ui.show then ui.show.v = show end
+    if show then
+        state.combo_was_down = true
+        printStyledString('[Cull Zone Creator] menu aberto - feche no X da janela', 1500, 4)
+    else
+        printStyledString('[Cull Zone Creator] menu fechado - C + L abre de novo', 1500, 4)
+    end
 end
 
+local function toggle_ui()
+    set_ui(not state.ui_show)
+end
+
+-- atalho principal: segurar as duas teclas abertas abre o menu
+local function handle_open_combo()
+    if state.ui_show then
+        -- o menu ja esta aberto: e preciso SOLTAR as teclas antes de abrir de novo
+        -- (assim fechar no X enquanto ainda segura C + L nao reabre na hora)
+        state.combo_was_down = true
+        return
+    end
+    local down = false
+    if state.open_combo_enabled and not state.capture then
+        local k1, k2 = state.open_combo[1], state.open_combo[2]
+        down = (k1 ~= 0 and k2 ~= 0) and key_held(k1) and key_held(k2)
+    end
+    if down and not state.combo_was_down then
+        set_ui(true)
+    end
+    state.combo_was_down = down or false
+end
+
+-- atalhos extras (todos desligados por padrao: o menu tem tudo em botoes)
 local function handle_keys()
     if key_just_pressed(state.keys.menu) then toggle_ui() end
     if key_just_pressed(state.keys.new_zone) then new_zone_at_player() end
@@ -2034,8 +2227,16 @@ function main()
     -- le a lista de zonas do jogo na primeira vez
     if Game.ok then scan_game_zones(state.player and state.player.x, state.player and state.player.y) end
 
-    log('carregado: F7 menu | F8 nova zona | F9 live | F10 overlay | F11 exportar')
-    printStringNow('~g~Cull Zone Creator ~w~v' .. VERSION .. ' - F7 abre o menu', 5000)
+    -- captura de tecla para trocar o atalho de abrir o menu
+    addEventHandler('onWindowMessage', function(message, wparam, lparam)
+        local ok, err = pcall(handle_window_message, message, wparam, lparam)
+        if not ok then log('onWindowMessage: %s', tostring(err)) end
+    end)
+
+    log('carregado: segure %s + %s para abrir o menu (fecha no X da janela)',
+        key_name(state.open_combo[1]), key_name(state.open_combo[2]))
+    printStringNow(string.format('~g~Cull Zone Creator ~w~v%s - segure ~b~%s + %s ~w~para o menu',
+        VERSION, key_name(state.open_combo[1]), key_name(state.open_combo[2])), 6000)
 
     local last_status, last_scan = 0, 0
     while true do
@@ -2043,6 +2244,7 @@ function main()
         local now = os.clock()
         local ok, err = pcall(function()
             update_player()
+            handle_open_combo()
             handle_keys()
 
             if font_dirty then
@@ -2066,6 +2268,7 @@ function main()
             imgui.Process = state.ui_show
             imgui.ShowCursor = state.ui_show
             imgui.RenderInMenu = state.render_in_menu
+            imgui.LockPlayer = state.lock_player and state.ui_show or false
 
             draw_begin()
             if state.overlays then build_overlay() end
@@ -2138,6 +2341,15 @@ if _G.CZC_TEST_HOOK then
         build_ui = build_ui,
         ui = ui,
         new_zone_at_player = new_zone_at_player,
+        ui_actions = ui_actions,
+        key_name = key_name,
+        key_held = key_held,
+        key_just_pressed = key_just_pressed,
+        handle_keys = handle_keys,
+        handle_open_combo = handle_open_combo,
+        handle_window_message = handle_window_message,
+        set_ui = set_ui,
+        toggle_ui = toggle_ui,
         save_config = save_config,
         load_config = load_config,
     })

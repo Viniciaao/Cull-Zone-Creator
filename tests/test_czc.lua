@@ -66,6 +66,9 @@ function doesCharExist(ped) return true end
 function getCharCoordinates(ped) return 100.0, 200.0, 12.0 end
 function setCharCoordinates(ped, x, y, z) end
 function isKeyJustPressed(key) return false end
+KEY_DOWN = {}                     -- teclas seguradas (controlado pelos testes)
+function isKeyDown(key) return KEY_DOWN[key] == true end
+function printStyledString(text, time, style) end
 function getDistanceBetweenCoords2d(x1, y1, x2, y2)
     local dx, dy = x1 - x2, y1 - y2
     return math.sqrt(dx * dx + dy * dy)
@@ -545,7 +548,129 @@ do
 end
 
 --=============================================================================
--- 14. RESULTADO
+-- 14. ATALHO C + L / ABRIR E FECHAR O MENU
+--=============================================================================
+do
+    local C, L = 0x43, 0x4C
+    KEY_DOWN = {}
+    hook.state.open_combo = { C, L }
+    hook.state.open_combo_enabled = true
+    hook.state.ui_show = false
+    hook.ui.show = fake_imgui.ImBool(false)
+
+    ok(hook.key_name(C) == 'C' and hook.key_name(L) == 'L', 'key_name: C e L', hook.key_name(C) .. hook.key_name(L))
+    ok(hook.key_name(0) == 'nenhuma', 'key_name: 0 = nenhuma')
+    ok(hook.key_name(0x70) == 'F1', 'key_name: F1')
+
+    -- soh C ou soh L nao abre
+    KEY_DOWN[C] = true
+    hook.handle_open_combo()
+    ok(hook.state.ui_show == false, 'só C (ou só L) NAO abre o menu')
+    KEY_DOWN[L] = true
+    hook.handle_open_combo()
+    ok(hook.state.ui_show == true, 'C + L abre o menu')
+    ok(hook.ui.show.v == true, 'o X/ImGui fica sabendo que o menu esta aberto')
+
+    -- continuar segurando nao fica reabrindo
+    hook.handle_open_combo()
+    hook.handle_open_combo()
+    ok(hook.state.ui_show == true, 'segurar C + L nao fica alternando o menu')
+
+    -- fecha no X segurando C + L ainda: nao pode reabrir na hora
+    KEY_DOWN[C] = true
+    KEY_DOWN[L] = true
+    hook.handle_open_combo()
+    hook.ui.show.v = false
+    hook.state.ui_show = false
+    hook.handle_open_combo()
+    ok(hook.state.ui_show == false, 'fechar no X com C + L segurado nao reabre o menu')
+    hook.handle_open_combo()
+    ok(hook.state.ui_show == false, 'segurando C + L o menu continua fechado')
+
+    -- solta e aperta de novo: abre
+    KEY_DOWN = {}
+    hook.handle_open_combo()
+    ok(hook.state.ui_show == false, 'menu fechado continua fechado')
+    KEY_DOWN[C] = true
+    KEY_DOWN[L] = true
+    hook.handle_open_combo()
+    ok(hook.state.ui_show == true, 'soltar C + L e apertar de novo reabre o menu')
+    hook.set_ui(false)
+    KEY_DOWN = {}
+
+    -- solta as teclas (um frame) e aperta de novo: abre outra vez
+    hook.handle_open_combo()
+    ok(hook.state.ui_show == false, 'com as teclas soltas o menu continua fechado')
+    KEY_DOWN[C] = true
+    KEY_DOWN[L] = true
+    hook.handle_open_combo()
+    ok(hook.state.ui_show == true, 'soltar e apertar C + L de novo abre o menu')
+
+    -- desligar o atalho: C + L nao abre mais
+    hook.set_ui(false)
+    KEY_DOWN = {}
+    hook.handle_open_combo()
+    hook.state.open_combo_enabled = false
+    KEY_DOWN[C] = true
+    KEY_DOWN[L] = true
+    hook.handle_open_combo()
+    ok(hook.state.ui_show == false, 'atalho desligado nao abre o menu')
+    hook.state.open_combo_enabled = true
+
+    -- toggle (usado pelo atalho extra) e o botao "Fechar menu"
+    hook.set_ui(false)
+    hook.toggle_ui()
+    ok(hook.state.ui_show == true, 'toggle_ui abre')
+    hook.toggle_ui()
+    ok(hook.state.ui_show == false, 'toggle_ui fecha')
+
+    -- atalhos extras desligados por padrao nao quebram
+    KEY_DOWN = {}
+    ok(pcall(hook.handle_keys), 'handle_keys: sem atalhos configurados nao quebra')
+    ok(hook.state.keys.menu == 0 and hook.state.keys.new_zone == 0, 'atalhos extras comecam desligados')
+    ok(hook.key_just_pressed(0) == false, 'tecla 0 (nenhuma) nunca dispara')
+end
+
+--=============================================================================
+-- 15. TROCAR A TECLA DO ATALHO (onWindowMessage)
+--=============================================================================
+do
+    local WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN = 0x100, 0x101, 0x201
+    hook.state.open_combo = { 0x43, 0x4C }
+
+    -- sem captura, nada acontece
+    hook.state.capture = nil
+    hook.handle_window_message(WM_KEYDOWN, 0x4B)
+    ok(hook.state.open_combo[1] == 0x43, 'sem captura o atalho nao muda')
+
+    -- captura a 1a tecla: aperta K
+    hook.state.capture = 'open1'
+    hook.handle_window_message(WM_KEYDOWN, 0x4B)
+    ok(hook.state.capture == nil, 'captura terminou')
+    ok(hook.state.open_combo[1] == 0x4B, 'primeira tecla trocada para K', hook.state.open_combo[1])
+    ok(hook.state.combo_was_down == true, 'nao abre o menu com a tecla recem escolhida')
+
+    -- so WM_KEYDOWN vale (KEYUP e clique de mouse sao ignorados)
+    hook.state.capture = 'open2'
+    hook.handle_window_message(WM_KEYUP, 0x50)
+    hook.handle_window_message(WM_LBUTTONDOWN, 0x50)
+    ok(hook.state.capture == 'open2', 'ignora KEYUP e mouse na captura')
+    -- Shift/Ctrl/Alt sozinhos tambem sao ignorados
+    hook.handle_window_message(WM_KEYDOWN, 0x10)
+    ok(hook.state.capture == 'open2', 'ignora Shift sozinho')
+    hook.handle_window_message(WM_KEYDOWN, 0x50)
+    ok(hook.state.open_combo[2] == 0x50, 'segunda tecla trocada para P', hook.state.open_combo[2])
+
+    -- ESC cancela
+    hook.state.capture = 'open1'
+    hook.handle_window_message(WM_KEYDOWN, 0x1B)
+    ok(hook.state.capture == nil and hook.state.open_combo[1] == 0x4B, 'ESC cancela a troca de tecla')
+
+    hook.state.open_combo = { 0x43, 0x4C }
+end
+
+--=============================================================================
+-- 16. RESULTADO
 --=============================================================================
 print(string.format('\n[test_czc] %d testes OK, %d falhas', passed, failed))
 if failed > 0 then

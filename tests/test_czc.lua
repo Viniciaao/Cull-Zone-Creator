@@ -257,6 +257,10 @@ do
     local z2 = hook.parse_cull_line('  10, -20, 5, 0, 15, 0, 15, 0, 30, 8, 0  # teste')
     ok(z2 ~= nil and z2.cx == 10 and z2.flags == 8, 'parse_cull_line ignora comentario')
 
+    -- variante sem o campo Unknown3 (10 campos)
+    local z3 = hook.parse_cull_line('5, 6, 7, 0, 10, 0, 10, 0, 20, 8')
+    ok(z3 ~= nil and z3.flags == 8 and z3.zt == 20, 'parse_cull_line: aceita 10 campos')
+
     -- linha invalida
     ok(hook.parse_cull_line('cull') == nil, 'parse_cull_line: texto sem numeros = nil')
     ok(hook.parse_cull_line('1, 2, 3') == nil, 'parse_cull_line: campos de menos = nil')
@@ -398,6 +402,23 @@ do
     ok(rs16(base + 12) == 10 and rs16(base + 14) == 40, 'live_apply: Bottom/Top')
     ok(mem_get(base + 16, 2) == 8, 'live_apply: flags = 8', mem_get(base + 16, 2))
 
+    -- escrita com coordenadas negativas (complemento de dois)
+    local neg = hook.new_zone()
+    neg.cx, neg.cy, neg.zb, neg.zt = -1500.7, -800.2, -5.5, 20.5
+    neg.hw, neg.hl = 12.5, 25.5
+    neg.flags = 8
+    hook.add_zone(neg)
+    hook.state.live_apply = true
+    hook.live_apply(true)
+    local nbase = A.ATTR_ZONES + 3 * 18
+    ok(rs16(nbase + 0) == -1513, 'live_apply: x1 negativo truncado', rs16(nbase + 0))
+    ok(rs16(nbase + 2) == -825, 'live_apply: y1 negativo truncado', rs16(nbase + 2))
+    ok(rs16(nbase + 6) == 51, 'live_apply: y2 = 2*Length', rs16(nbase + 6))
+    ok(rs16(nbase + 8) == 25, 'live_apply: x3 = 2*Width', rs16(nbase + 8))
+    ok(rs16(nbase + 12) == -5, 'live_apply: Bottom negativo', rs16(nbase + 12))
+    table.remove(hook.state.zones)
+    hook.live_apply(true)
+
     -- o espelho: Cm em float (bits) + direcao + flags
     local mbase = A.MIRROR_ZONES + 0 * 24
     ok(mem_get(mbase + 16, 4) == hook.float_bits(2.5), 'live_apply: Cm gravado como float',
@@ -487,7 +508,44 @@ do
 end
 
 --=============================================================================
--- 13. RESULTADO
+-- 13. EXPORTACAO EM ARQUIVO (ida e volta)
+--=============================================================================
+do
+    local TMP = '/tmp/czc_test_export.ipl'
+    hook.state.zones = {}
+    local z = hook.new_zone()
+    z.name = 'Zona de teste'
+    z.cx, z.cy, z.zb, z.zt = 1.5, 2.5, 3.5, 40.5
+    z.hw, z.hl, z.sx, z.sy = 15, 25, 0, 0
+    z.flags = 8
+    hook.add_zone(z)
+    hook.state.only_enabled = true
+
+    local okk, path, n = hook.export_ipl(TMP)
+    ok(okk == true, 'export_ipl: gravou o arquivo', path)
+    ok(n == 1, 'export_ipl: contou 1 zona', n)
+
+    local f = io.open(path, 'rb')
+    local data = f and f:read('*a') or nil
+    if f then f:close() end
+    ok(data ~= nil, 'export_ipl: arquivo ilegivel')
+    ok(data and data:find('\r\ncull\r\n') ~= nil, 'export_ipl: secao cull no arquivo')
+    ok(data and data:find('\r\n1%.500, 2%.500, 22%.000, 0%.000000, 25%.000000, 3%.500, 15%.000000, 0%.000000, 40%.500, 8, 0') ~= nil,
+        'export_ipl: linha com os campos na ordem do IPL', data and data:match('([^\r\n]+)%.000, 8, 0'))
+
+    hook.state.zones = {}
+    local imported = hook.import_from_text(data)
+    ok(imported == 1, 'import_from_text: releu a zona exportada', imported)
+    ok(hook.state.zones[1] ~= nil and hook.state.zones[1].flags == 8, 'import_from_text: flags preservadas')
+    ok(hook.state.zones[1] ~= nil and hook.state.zones[1].hw == 15, 'import_from_text: Width preservado',
+        hook.state.zones[1] and hook.state.zones[1].hw)
+
+    ok(pcall(hook.import_from_file, TMP), 'import_from_file: rodou sem erro')
+    os.remove(TMP)
+end
+
+--=============================================================================
+-- 14. RESULTADO
 --=============================================================================
 print(string.format('\n[test_czc] %d testes OK, %d falhas', passed, failed))
 if failed > 0 then

@@ -379,7 +379,7 @@ local function parse_cull_line(line)
         if not n then return nil end
         nums[#nums + 1] = n
     end
-    if #nums < 11 then return nil end
+    if #nums < 10 then return nil end
     local z = new_zone()
     z.cx, z.cy = nums[1], nums[2]
     z.sx, z.hl, z.zb, z.hw, z.sy, z.zt = nums[4], nums[5], nums[6], nums[7], nums[8], nums[9]
@@ -568,6 +568,9 @@ end
 
 local game_dirty = true
 local function MarkLiveDirty() game_dirty = true end
+
+-- a fonte do HUD so pode ser recriada fora do onD3DPresent
+local font_dirty = false
 
 local function selected_zone()
     return state.zones[state.selected]
@@ -994,6 +997,8 @@ local Draw = {
     quads = {},
     texts = {},
     font = nil,
+    font_height = nil,
+    fonts = {},
     shape = nil,
     fills_ok = true,
     fails = 0,
@@ -1018,13 +1023,22 @@ end
 
 local function draw_init()
     if type(renderCreateFont) == 'function' then
-        local flags = 5
-        if moonlib and moonlib.font_flag then
-            flags = (moonlib.font_flag.SHADOW or 0) + (moonlib.font_flag.BOLD or 0)
-            if flags == 0 then flags = 5 end
+        local height = ctrunc(state.font_height or 9)
+        local font = Draw.fonts[height]
+        if not font then
+            local flags = 5
+            if moonlib and moonlib.font_flag then
+                flags = (moonlib.font_flag.SHADOW or 0) + (moonlib.font_flag.BOLD or 0)
+                if flags == 0 then flags = 5 end
+            end
+            local ok, created = pcall(renderCreateFont, 'Arial', height, flags)
+            if ok and type(created) == 'number' then
+                font = created
+                Draw.fonts[height] = font
+            end
         end
-        local ok, font = pcall(renderCreateFont, 'Arial', state.font_height or 9, flags)
-        if ok and type(font) == 'number' then Draw.font = font end
+        Draw.font = font
+        Draw.font_height = height
     end
     if ok_mad and mad and mad.shape then
         local ok, shp = pcall(function() return mad.shape.new() end)
@@ -1782,8 +1796,7 @@ local function ui_settings()
     fh = slider_int('font_height', 'Tamanho da fonte do HUD', state.font_height, 6, 16)
     if fh ~= state.font_height then
         state.font_height = fh
-        Draw.font = nil
-        draw_init()
+        font_dirty = true    -- a fonte e recriada no loop principal
     end
     imgui.SameLine()
     local dry = checkbox('dry_run', 'Modo seguro (nao mexe na memoria)', state.dry_run)
@@ -1850,6 +1863,10 @@ local function build_ui()
         ui_help()
     end
     imgui.End()
+    -- se o jogador fechou a janela no "X", mantem o estado em sincronia
+    if ui.show and ui.show.v ~= state.ui_show then
+        state.ui_show = ui.show.v and true or false
+    end
 end
 
 --=============================================================================
@@ -1914,7 +1931,7 @@ function load_config(silent)
         end
         if type(s.keys) == 'table' and type(state.keys) == 'table' then
             for k, v in pairs(s.keys) do
-                if type(v) == 'number' then state.keys[k] = v end
+                if state.keys[k] ~= nil and type(v) == 'number' and v > 0 then state.keys[k] = v end
             end
         end
     end
@@ -2028,6 +2045,11 @@ function main()
             update_player()
             handle_keys()
 
+            if font_dirty then
+                font_dirty = false
+                draw_init()
+            end
+
             if game_dirty then live_apply(false) end
 
             if Game.ok and (now - last_status) > 0.15 then
@@ -2102,8 +2124,11 @@ if _G.CZC_TEST_HOOK then
         query_game_status = query_game_status,
         scan_game_zones = scan_game_zones,
         import_from_text = import_from_text,
-        build_ipl_text = build_ipl_text,
+        import_from_file = import_from_file,
+        import_from_game = import_from_game,
         export_ipl = export_ipl,
+        export_modloader_package = export_modloader_package,
+        copy_text = copy_text,
         default_paths = default_paths,
         draw_init = draw_init,
         draw_begin = draw_begin,

@@ -583,7 +583,7 @@ local state = {
     overlay_max_zones = 40,        -- quantas zonas desenhar por frame
     overlay_offset_x = 0,          -- ajuste fino da projecao (pixels)
     overlay_offset_y = 0,
-    overlay_with_menu = false,     -- desenhar overlay/HUD com o menu aberto
+    overlay_with_menu = true,      -- desenhar overlay/HUD com o menu aberto
     show_game_zones = false,
     only_selected_overlay = false,
     overlay_max_dist = 400,
@@ -1430,17 +1430,34 @@ local function build_hud()
     end
 end
 
--- desenha tudo (chamado dentro do onD3DPresent)
-local function draw_present()
+-- O overlay deve aparecer mesmo com o menu aberto (e o menu fica por cima).
+-- Como o Moon ImGui desenha a janela dele no FIM do onD3DPresent, tudo o que
+-- desenhamos depois dele sai por cima da janela. Por isso, com o menu aberto,
+-- desenhamos atraves do imgui.BeforeDrawFrame (a lib chama isso ANTES do render
+-- dela) - assim as zonas ficam atras do menu, como deve ser.
+local function menu_esta_desenhando()
+    if not state.ui_show then return false end
     if state.render_in_menu == false then
         local ok, paused = pcall(isPauseMenuActive)
-        if ok and paused then return end
+        if ok and paused then return false end
     end
+    return true
+end
 
-    -- nosso desenho sai por cima do menu do ImGui (a ordem dos eventos), entao
-    -- com o menu aberto o overlay/HUD so aparece se o usuario quiser
-    if state.ui_show and state.overlay_with_menu == false then return end
-    local mul = state.ui_show and 0.5 or 1.0
+-- com o menu aberto e a opcao desligada, nao desenha overlay nenhum
+local function overlay_visivel()
+    if state.ui_show and state.overlay_with_menu == false then return false end
+    if state.render_in_menu == false then
+        local ok, paused = pcall(isPauseMenuActive)
+        if ok and paused then return false end
+    end
+    return true
+end
+
+-- desenha tudo (chamado dentro do onD3DPresent)
+local function draw_present()
+    if not overlay_visivel() then return end
+    local mul = 1.0
 
     for _, b in ipairs(Draw.boxes) do
         pcall(renderDrawBox, b[1], b[2], b[3], b[4], fade(b[5], mul))
@@ -1484,6 +1501,31 @@ local function draw_present()
     end
 end
 
+-- controle de "quem desenha neste frame" (evita desenhar duas vezes)
+local present_seq, drawn_seq = 0, -1
+
+-- com o menu aberto quem desenha e o imgui.BeforeDrawFrame (que a lib chama
+-- antes de renderizar a janela, ou seja: o overlay fica ATRAS do menu); com o
+-- menu fechado e o nosso proprio evento do D3D
+function setup_events()
+    imgui.BeforeDrawFrame = function()
+        if drawn_seq == present_seq then return end
+        drawn_seq = present_seq
+        local ok, err = pcall(draw_present)
+        if not ok then log('erro no desenho (menu): %s', tostring(err)) end
+    end
+
+    addEventHandler('onD3DPresent', function()
+        present_seq = present_seq + 1
+        if menu_esta_desenhando() then return end   -- o BeforeDrawFrame cuida disso
+        if drawn_seq == present_seq then return end
+        drawn_seq = present_seq
+        local ok, err = pcall(draw_present)
+        if not ok then log('erro no desenho: %s', tostring(err)) end
+    end)
+end
+
+
 --=============================================================================
 -- INTERFACE (Moon ImGui)
 --
@@ -1496,12 +1538,14 @@ local save_config, load_config
 local new_zone_at_player
 local set_ui, toggle_ui          -- definidas mais abaixo (usadas no cabecalho)
 
+-- Abas do menu. Sao BOTOES (e nao Selectable): botao e o widget que comprovadamente
+-- funciona em todas as builds do Moon ImGui, e o marcador '>' mostra a aba atual.
 local PAGES = {
-    { id = 1, name = ' Zonas ' },
-    { id = 2, name = ' Exportar ' },
-    { id = 3, name = ' Jogo ' },
-    { id = 4, name = ' Config ' },
-    { id = 5, name = ' Ajuda ' },
+    { id = 1, name = 'Zonas' },
+    { id = 2, name = 'Exportar' },
+    { id = 3, name = 'Jogo' },
+    { id = 4, name = 'Config' },
+    { id = 5, name = 'Ajuda' },
 }
 
 -- o binding de Columns nem sempre existe/funciona em todas as builds
@@ -1633,7 +1677,26 @@ local function same_line()
 end
 
 local function text_colored(text, r, g, b)
-    imgui.TextColored(imgui.ImVec4(r, g, b, 1.0), text)
+    if type(imgui.TextColored) == 'function' then
+        imgui.TextColored(imgui.ImVec4(r, g, b, 1.0), text)
+    else
+        imgui.Text(text)
+    end
+end
+
+-- TextWrapped nem sempre existe; cai para Text
+local function text_wrapped(text)
+    if type(imgui.TextWrapped) == 'function' then
+        imgui.TextWrapped(text)
+    else
+        imgui.Text(text)
+    end
+end
+
+-- tooltip: so se o binding existir (e o item estiver sob o mouse)
+local function tooltip(text)
+    if type(imgui.IsItemHovered) ~= 'function' or type(imgui.SetTooltip) ~= 'function' then return end
+    if imgui.IsItemHovered() then imgui.SetTooltip(text) end
 end
 
 local function set_export_path(path)
@@ -1720,7 +1783,9 @@ end
 
 local function ui_page_bar()
     for _, pg in ipairs(PAGES) do
-        if imgui.Selectable(pg.name .. '##page' .. pg.id, ui.page == pg.id) then
+        local ativo = (ui.page == pg.id)
+        local label = (ativo and '> ' or '') .. pg.name
+        if button(label .. '##page' .. pg.id, 105) then
             ui.page = pg.id
         end
         same_line()
@@ -1748,7 +1813,7 @@ local function ui_flags(z)
             end
             MarkLiveDirty()
         end
-        if imgui.IsItemHovered() then imgui.SetTooltip(f.desc) end
+        tooltip(f.desc)
     end
 
     -- duas colunas, se o binding de Columns existir e funcionar
@@ -1906,8 +1971,9 @@ local function ui_list()
                 end
             end
             same_line()
-            if imgui.Selectable(string.format('%d. %s [%s]%s##sel%d', i, z.name, flag_list(z.flags),
-                z.enabled and '' or ' (off)', i), i == state.selected) then
+            local label = string.format('%s%d. %s [%s]%s', (i == state.selected) and '>' or ' ', i,
+                z.name, flag_list(z.flags):sub(1, 30), z.enabled and '' or ' (off)')
+            if button(label .. '##sel' .. i, 420) then
                 state.selected = i
             end
         end
@@ -1962,7 +2028,7 @@ local function ui_page_export()
                 msg(string.format('%d zona(s) copiada(s) para o clipboard.', n), 140, 220, 255)
             end
         end
-        if EXPORT_DIR then imgui.TextWrapped('Pasta: ' .. EXPORT_DIR) end
+        if EXPORT_DIR then text_wrapped('Pasta: ' .. EXPORT_DIR) end
 
         imgui.Separator()
         imgui.Text('Importar')
@@ -1991,7 +2057,7 @@ local function ui_page_export()
             add_zone(z)
             msg('Zona de exemplo adicionada.', 140, 220, 255)
         end
-        imgui.TextWrapped('O jogo le o IPL quando carrega o mapa. Para testar na hora, ligue "Aplicar no jogo".')
+        text_wrapped('O jogo le o IPL quando carrega o mapa. Para testar na hora, ligue "Aplicar no jogo".')
     end)
 end
 
@@ -2021,7 +2087,7 @@ local function ui_page_game()
         if st then
             imgui.Text(string.format('Flags aplicadas no jogador agora: %s', flag_list(st.flags_player)))
         end
-        imgui.TextWrapped('Os espelhos (reflexo no chao) usam Cm/direcao. Copiar uma zona do jogo traz ela pronta para editar.')
+        text_wrapped('Os espelhos (reflexo no chao) usam Cm/direcao. Copiar uma zona do jogo traz ela pronta para editar.')
     end)
 end
 
@@ -2041,15 +2107,17 @@ local function ui_page_config()
         local wm = checkbox('overlay_with_menu', 'Mostrar com o menu aberto', state.overlay_with_menu)
         if wm ~= nil then state.overlay_with_menu = wm end
 
-        imgui.Text('Estilo:')
-        local styles = { { 'solid', ' Solido ' }, { 'glass', ' Vidro ' }, { 'wire', ' So contorno ' } }
-        for _, s in ipairs(styles) do
-            same_line()
-            if imgui.Selectable(s[2] .. '##style' .. s[1], (state.overlay_style or 'solid') == s[1]) then
-                state.overlay_style = s[1]
-                if s[1] == 'wire' then state.overlay_faces = false else state.overlay_faces = true end
+        imgui.Text('Estilo do overlay:')
+        local styles = { { 'solid', 'Solido' }, { 'glass', 'Vidro' }, { 'wire', 'So contorno' } }
+        for _, st in ipairs(styles) do
+            local ativo = (state.overlay_style or 'solid') == st[1]
+            if button((ativo and '> ' or '') .. st[2] .. '##style_' .. st[1], 120) then
+                state.overlay_style = st[1]
+                if st[1] == 'wire' then state.overlay_faces = false else state.overlay_faces = true end
             end
+            same_line()
         end
+        imgui.NewLine()
         local d = slider_int('ov_dist', 'Distancia maxima do overlay (m)', state.overlay_max_dist, 30, 2000)
         state.overlay_max_dist = d
         same_line()
@@ -2127,7 +2195,8 @@ local function ui_page_config()
                 imgui.Text(labels[key] .. ':')
                 for _, vk in ipairs(vks) do
                     same_line()
-                    if imgui.Selectable(vk[2] .. '##k' .. key .. vk[1], state.keys[key] == vk[1]) then
+                    local ativo = state.keys[key] == vk[1]
+                    if button((ativo and '>' or '') .. vk[2] .. '##k' .. key .. vk[1], 44) then
                         state.keys[key] = vk[1]
                     end
                 end
@@ -2165,28 +2234,28 @@ local function ui_page_config()
             MarkLiveDirty()
             msg('Lista de zonas limpa.', 255, 190, 120)
         end
-        if SAVE_FILE then imgui.TextWrapped('Save: ' .. SAVE_FILE) end
+        if SAVE_FILE then text_wrapped('Save: ' .. SAVE_FILE) end
     end)
 end
 
 local function ui_page_help()
     ui_child('czc_page_help', imgui.ImVec2(0, 0), function()
-        imgui.TextWrapped('ABRIR: segure ' .. key_name(state.open_combo[1]) .. ' + ' ..
+        text_wrapped('ABRIR: segure ' .. key_name(state.open_combo[1]) .. ' + ' ..
             key_name(state.open_combo[2]) .. '   |   FECHAR: clique no X da janela.')
         imgui.Separator()
-        imgui.TextWrapped('1) Em "Zonas": clique em "Nova zona no player" - a posicao do jogador vira o centro da zona.')
-        imgui.TextWrapped('2) Ajuste o tamanho (meia largura X / meia altura Y, em metros) e a altura (Bottom/Top, Z do mundo).')
-        imgui.TextWrapped('3) Marque NO_RAIN para a zona nao ter chuva (e nem helicoptero de policia).')
-        imgui.TextWrapped('4) Com "Aplicar no jogo" ligado o efeito vale na hora: ande para dentro e para fora e olhe o HUD.')
-        imgui.TextWrapped('5) Em "Exportar": gere o .ipl (ou o Pacote ModLoader, que cria cull.ipl + gta.dat prontos).')
+        text_wrapped('1) Em "Zonas": clique em "Nova zona no player" - a posicao do jogador vira o centro da zona.')
+        text_wrapped('2) Ajuste o tamanho (meia largura X / meia altura Y, em metros) e a altura (Bottom/Top, Z do mundo).')
+        text_wrapped('3) Marque NO_RAIN para a zona nao ter chuva (e nem helicoptero de policia).')
+        text_wrapped('4) Com "Aplicar no jogo" ligado o efeito vale na hora: ande para dentro e para fora e olhe o HUD.')
+        text_wrapped('5) Em "Exportar": gere o .ipl (ou o Pacote ModLoader, que cria cull.ipl + gta.dat prontos).')
         imgui.Separator()
-        imgui.TextWrapped('O overlay mostra a caixa da zona: as faces so ficam visiveis quando olhamos para o lado de fora ' ..
+        text_wrapped('O overlay mostra a caixa da zona: as faces so ficam visiveis quando olhamos para o lado de fora ' ..
             'delas (como uma caixa de verdade), e o que esta mais longe fica mais transparente. ' ..
             'Ajuste o estilo em Config (Solido / Vidro / So contorno).')
         imgui.Separator()
-        imgui.TextWrapped('O box usa MEIO tamanho: 30 = 60x60 metros. Bottom/Top sao Z absolutos do mundo.')
-        imgui.TextWrapped('Cull zone de IPL so vale quando o jogo carrega o mapa - o live apply e para testar na hora.')
-        imgui.TextWrapped('Em jogo que nao seja 1.0 US, deixe o "Modo seguro" ligado: a memoria nao e tocada.')
+        text_wrapped('O box usa MEIO tamanho: 30 = 60x60 metros. Bottom/Top sao Z absolutos do mundo.')
+        text_wrapped('Cull zone de IPL so vale quando o jogo carrega o mapa - o live apply e para testar na hora.')
+        text_wrapped('Em jogo que nao seja 1.0 US, deixe o "Modo seguro" ligado: a memoria nao e tocada.')
     end)
 end
 
@@ -2475,10 +2544,7 @@ function main()
 
     imgui.OnDrawFrame = draw_ui_frame
 
-    addEventHandler('onD3DPresent', function()
-        local ok, err = pcall(draw_present)
-        if not ok then log('erro no desenho: %s', tostring(err)) end
-    end)
+    setup_events()
 
     -- le a lista de zonas do jogo na primeira vez
     if Game.ok then scan_game_zones(state.player and state.player.x, state.player and state.player.y) end
@@ -2611,6 +2677,10 @@ if _G.CZC_TEST_HOOK then
         ui_list = ui_list,
         ui_flags = ui_flags,
         draw_zone_box = draw_zone_box,
+        imgui = imgui,
+        setup_events = setup_events,
+        menu_esta_desenhando = menu_esta_desenhando,
+        overlay_visivel = overlay_visivel,
         camera_position = camera_position,
         wall_faces_camera = wall_faces_camera,
         PAGES = PAGES,

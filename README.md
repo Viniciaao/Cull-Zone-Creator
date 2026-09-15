@@ -95,6 +95,17 @@ ao iniciar / recarregar o save). Para testar sem reiniciar, use o live apply.
 
 ---
 
+## Notas de compatibilidade (ImGui)
+
+O script foi escrito para funcionar mesmo em builds mais limitadas do Moon ImGui:
+
+* as **abas** e os itens da lista são **botões** (o `Selectable` não responde em
+  todas as builds; o item ativo é marcado com `> `);
+* `Selectable`, `TextWrapped`, `SetTooltip`, `Columns` e `StrCopy` são usados
+  apenas se existirem, com alternativa simples (`Button`/`Text`/uma coluna);
+* cada seção do menu roda protegida e o `End()` da janela é **sempre** chamado —
+  é isso que impede o crash `Mismatched Begin()/End() calls` quando algo falha.
+
 ## Formato da cull zone (referência)
 
 Seção do IPL (GTA SA) — 11 campos:
@@ -185,11 +196,15 @@ Estilo (em **Config → Overlay 3D**):
 | **Vidro** | as 6 faces sempre, bem transparentes (mostra a caixa inteira) |
 | **Só contorno** | nenhum preenchimento, apenas as arestas |
 
-Também dá para ligar/desligar: nomes, pilares nas quinas, "mostrar com o menu
-aberto" (por padrão o overlay **não** é desenhado enquanto o menu está aberto,
-para não sujar a tela), distância máxima, quantidade de zonas por frame e um
-**ajuste fino X/Y** em pixels caso a sua configuração de vídeo desloque o
-desenho.
+Também dá para ligar/desligar: nomes, pilares nas quinas, distância máxima,
+quantidade de zonas por frame e um **ajuste fino X/Y** em pixels caso a sua
+configuração de vídeo desloque o desenho.
+
+**Com o menu aberto o overlay continua aparecendo** (é o padrão, dá para desligar
+em Config → "Mostrar com o menu aberto"). Isso funciona assim: o Moon ImGui
+desenha a janela dele no *fim* do `onD3DPresent`, então quando o menu está aberto
+o script desenha pelo `imgui.BeforeDrawFrame` — que a lib chama **antes** de
+renderizar a janela — e as zonas aparecem **atrás** do menu, sem cobri-lo.
 
 ## Live apply: como funciona
 

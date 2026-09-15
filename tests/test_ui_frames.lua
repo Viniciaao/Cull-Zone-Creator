@@ -251,6 +251,13 @@ function fake_imgui.SetCursorPos(x, y) end
 function fake_imgui.GetContentRegionAvail() return fake_imgui.ImVec2(300, 300) end
 function fake_imgui.CalcTextSize(text) return fake_imgui.ImVec2(#text * 6, 12) end
 
+-- O script nao pode depender de widgets opcionais: Selectable (que se mostrou
+-- sem resposta em algumas builds) e TextWrapped/SetTooltip. Se ele voltar a usar
+-- algum desses, os testes abaixo quebram de proposito.
+fake_imgui.Selectable = nil
+fake_imgui.TextWrapped = nil
+fake_imgui.SetTooltip = nil
+
 package.loaded['imgui'] = fake_imgui
 
 -- MoonAdditions falso
@@ -484,18 +491,35 @@ ok(hook.state.overlays == true, 'o botao liga o overlay de novo')
 
 -- 8.7 trocar de pagina clicando
 hook.ui.page = 1
-click(' Exportar ##page2', 1)
+click('Exportar##page2', 1)
 frame('clique na aba Exportar')
 ok(hook.ui.page == 2, 'a aba Exportar abre pelo clique', hook.ui.page)
-click(' Jogo ##page3', 1)
+click('Jogo##page3', 1)
 frame('clique na aba Jogo')
 ok(hook.ui.page == 3, 'a aba Jogo abre pelo clique', hook.ui.page)
-click(' Config ##page4', 1)
+click('Config##page4', 1)
 frame('clique na aba Config')
 ok(hook.ui.page == 4, 'a aba Config abre pelo clique', hook.ui.page)
-click(' Ajuda ##page5', 1)
+click('Ajuda##page5', 1)
 frame('clique na aba Ajuda')
 ok(hook.ui.page == 5, 'a aba Ajuda abre pelo clique', hook.ui.page)
+
+-- 8.7b selecionar uma zona pelo botao da lista (Labels: '> 1. A##sel1' quando ativa)
+hook.ui.page = 1
+hook.state.zones = {}
+local zA = hook.new_zone()
+zA.name = 'A'
+hook.add_zone(zA)
+local zB = hook.new_zone()
+zB.name = 'B'
+hook.add_zone(zB)
+ok(hook.state.selected == 2, 'a ultima zona criada fica selecionada', hook.state.selected)
+click(' 1. A [NoRain]##sel1', 1)
+frame('clique na zona 1 da lista')
+ok(hook.state.selected == 1, 'o botao da lista seleciona a zona clicada', hook.state.selected)
+click(' 2. B [NoRain]##sel2', 1)
+frame('clique na zona 2 da lista')
+ok(hook.state.selected == 2, 'da para selecionar outra zona', hook.state.selected)
 
 -- 8.8 marcar o flag NO_RAIN na zona pela interface
 hook.ui.page = 1
@@ -509,6 +533,53 @@ ok(hook.state.zones[1].flags == 8, 'o checkbox do flag NoRain marca o bit', hook
 click('NoRain##flag8', 1)
 frame('clique no flag NoRain de novo')
 ok(hook.state.zones[1].flags == 0, 'o checkbox desmarca o bit', hook.state.zones[1].flags)
+
+-- 8.8b desenho com o menu aberto: quem desenha e o BeforeDrawFrame (fica atras
+-- da janela) e o nosso onD3DPresent nao desenha no mesmo frame
+hook.state.ui_show = true
+hook.ui.show.v = true
+hook.state.overlays = true
+ok(hook.menu_esta_desenhando() == true, 'com o menu aberto o desenho vai pelo BeforeDrawFrame')
+
+hook.setup_events()          -- registra o BeforeDrawFrame e o onD3DPresent
+GAME.lines, GAME.texts, GAME.boxes = 0, 0, 0
+hook.draw_begin()
+hook.build_overlay()
+hook.build_hud()
+-- primeira chamada: o BeforeDrawFrame desenha
+if type(hook.imgui.BeforeDrawFrame) == 'function' then
+    hook.imgui.BeforeDrawFrame()
+    ok(GAME.lines > 0, 'BeforeDrawFrame desenha o overlay com o menu aberto', GAME.lines)
+    -- segunda chamada no mesmo frame nao pode desenhar de novo (sem duplicar)
+    local antes = GAME.lines
+    hook.imgui.BeforeDrawFrame()
+    ok(GAME.lines == antes, 'o overlay nao e desenhado duas vezes no mesmo frame', GAME.lines - antes)
+else
+    ok(false, 'imgui.BeforeDrawFrame foi registrado pelo script')
+end
+
+-- agora um frame do evento do D3D: com o menu aberto ele NAO desenha
+if GAME.event_onD3DPresent then
+    GAME.lines, GAME.texts, GAME.boxes = 0, 0, 0
+    hook.draw_begin()
+    hook.build_overlay()
+    hook.build_hud()
+    GAME.event_onD3DPresent()
+    ok(GAME.lines == 0, 'com o menu aberto o evento do D3D nao desenha por cima do menu', GAME.lines)
+    -- com o menu fechado, o evento do D3D desenha normalmente
+    hook.state.ui_show = false
+    hook.ui.show.v = false
+    GAME.lines, GAME.texts, GAME.boxes = 0, 0, 0
+    hook.draw_begin()
+    hook.build_overlay()
+    hook.build_hud()
+    GAME.event_onD3DPresent()
+    ok(GAME.lines > 0, 'com o menu fechado o overlay e desenhado pelo evento do D3D', GAME.lines)
+    hook.state.ui_show = true
+    hook.ui.show.v = true
+else
+    ok(false, 'o script registrou o evento onD3DPresent')
+end
 
 -- 8.9 fechar o menu (o cenario do crash)
 hook.ui.show.v = true

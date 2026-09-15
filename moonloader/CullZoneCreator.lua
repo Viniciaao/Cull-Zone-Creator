@@ -577,7 +577,13 @@ local state = {
     overlays = true,
     hud = true,
     show_labels = true,
-    show_ground = true,
+    overlay_faces = true,          -- preencher as faces (aparencia solida)
+    overlay_pillars = true,        -- linhas verticais nas quinas
+    overlay_style = 'solid',       -- solid | glass | wire
+    overlay_max_zones = 40,        -- quantas zonas desenhar por frame
+    overlay_offset_x = 0,          -- ajuste fino da projecao (pixels)
+    overlay_offset_y = 0,
+    overlay_with_menu = false,     -- desenhar overlay/HUD com o menu aberto
     show_game_zones = false,
     only_selected_overlay = false,
     overlay_max_dist = 400,
@@ -1032,11 +1038,20 @@ local function copy_text(text)
 end
 
 --=============================================================================
--- DESENHO (overlay 3D + HUD) - tudo dentro de onD3DPresent
+-- DESENHO (overlay 3D + HUD)
 --
--- O MoonLoader desenha os 'render*' em PIXELS da janela, exatamente as
--- coordenadas que convert3DCoordsToScreen devolve. Os preenchimentos usam o
--- MoonAdditions (mad.shape), tambem em pixels.
+-- Tudo e desenhado de dentro do onD3DPresent com as funcoes render* do
+-- MoonLoader, que usam coordenadas em PIXELS da janela - exatamente as mesmas
+-- devolvidas pelo convert3DCoordsToScreen.
+--
+-- A caixa da zona e desenhada como um SOLIDO:
+--   * 8 vertices (4 embaixo, 4 em cima) projetados na tela;
+--   * as 6 faces viram quadrados preenchidos (mad.shape) desenhados de tras
+--     para frente (ordem de pintura), com a opacidade caindo com a distancia;
+--   * faces viradas para o lado oposto da camera sao descartadas (backface
+--     culling), o que tira a "ilusao" de cubo de arame flutuante;
+--   * os aneis de baixo e de cima sao desenhados por cima (renderDrawLine)
+--     para a zona ficar bem marcada mesmo de longe.
 --=============================================================================
 local Draw = {
     lines = {},
@@ -1065,6 +1080,7 @@ local function fade(color, mul)
     if not mul or mul >= 1 then return color end
     local a = bit.band(bit.rshift(color, 24), 0xFF)
     a = ctrunc(a * mul)
+    if a < 0 then a = 0 end
     return bit.bor(bit.lshift(a, 24), bit.band(color, 0x00FFFFFF))
 end
 
@@ -1110,9 +1126,10 @@ local function draw_box(x, y, w, h, color, border_size, border_color)
         ctrunc(border_size or 0), border_color }
 end
 
-local function draw_quad(x1, y1, x2, y2, x3, y3, x4, y4, color)
-    Draw.quads[#Draw.quads + 1] = { ctrunc(x1), ctrunc(y1), ctrunc(x2), ctrunc(y2),
-        ctrunc(x3), ctrunc(y3), ctrunc(x4), ctrunc(y4), color }
+-- quadrilatero preenchido, na ordem em que for chamado (ordem de pintura).
+-- O ultimo campo guarda a distancia da camera (usado nos testes).
+local function draw_quad(p1, p2, p3, p4, color, distance)
+    Draw.quads[#Draw.quads + 1] = { p1[1], p1[2], p2[1], p2[2], p3[1], p3[2], p4[1], p4[2], color, distance or 0 }
 end
 
 local function draw_text(text, x, y, color)
@@ -1143,28 +1160,61 @@ local function screen_size()
     return 640, 480
 end
 
--- projeta um ponto do mundo na tela (nil quando esta atras da camera)
+-- projeta um ponto do mundo na tela (nil quando esta atras da camera/fora).
+-- O ajuste fino (overlay_offset_*) existe para o caso de alguma configuracao de
+-- video devolver as coordenadas deslocadas em alguns pixels.
 local function project_point(x, y, z)
     local ok, px, py = pcall(convert3DCoordsToScreen, x, y, z)
     if not ok or type(px) ~= 'number' or type(py) ~= 'number' then return nil end
     if px ~= px or py ~= py then return nil end
+    if state.overlay_offset_x or state.overlay_offset_y then
+        px = px + (state.overlay_offset_x or 0)
+        py = py + (state.overlay_offset_y or 0)
+    end
     return px, py
 end
 
--- desenha uma zona (caixa 3D) e, se for a selecionada, o nome dela
-local function draw_zone_box(z, selected)
+-- posicao da camera (para a profundidade/ordem de pintura)
+local function camera_position()
+    if type(getActiveCameraCoordinates) == 'function' then
+        local ok, x, y, z = pcall(getActiveCameraCoordinates)
+        if ok and type(x) == 'number' and type(y) == 'number' then
+            return { x = x, y = y, z = z or 0 }
+        end
+    end
+    return state.player
+end
+
+local function dist2d(ax, ay, bx, by)
+    local dx, dy = ax - bx, ay - by
+    return math.sqrt(dx * dx + dy * dy)
+end
+
+-- o lado de fora da parede (i -> j) esta virado para a camera?
+local function wall_faces_camera(ax, ay, bx, by, camx, camy, winding)
+    local dx, dy = bx - ax, by - ay
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len < 0.001 then return false end
+    local nx, ny = winding * dy / len, -winding * dx / len
+    return (camx - ax) * nx + (camy - ay) * ny > 0
+end
+
+-- desenha uma zona (caixa 3D). Devolve quantas arestas foram desenhadas.
+local function draw_zone_box(z, selected, cam)
     local corners = zone_corners(z)
     local z1, z2 = ctrunc(z.zb), ctrunc(z.zt)
     if z2 < z1 then z1, z2 = z2, z1 end
 
     local bottom, top = {}, {}
+    local visible = 0
     for i = 1, 4 do
         local c = corners[i]
         local bx, by = project_point(c.x, c.y, z1)
         local tx, ty = project_point(c.x, c.y, z2)
-        if bx then bottom[i] = { bx, by } end
-        if tx then top[i] = { tx, ty } end
+        if bx then bottom[i] = { bx, by } visible = visible + 1 end
+        if tx then top[i] = { tx, ty } visible = visible + 1 end
     end
+    if visible == 0 then return 0 end
 
     local player_inside = false
     if state.player then
@@ -1172,35 +1222,100 @@ local function draw_zone_box(z, selected)
     end
 
     local r, g, b = z.color.r, z.color.g, z.color.b
-    if player_inside then
-        r, g, b = 90, 255, 90
-    end
-    local color = argb(r, g, b, selected and 255 or (player_inside and 230 or 170))
-    local width = selected and 3 or 2
+    if player_inside then r, g, b = 90, 255, 90 end
 
+    -- camera (usada para ordenar por profundidade e para o culling das faces)
+    cam = cam or camera_position()
+    local camx = cam and cam.x or 0
+    local camy = cam and cam.y or 0
+    local camz = cam and cam.z or 0
+    local cam_inside = zone_contains(z, camx, camy, camz)
+    local inside_any = cam_inside or player_inside
+
+    local det = (corners[2].x - corners[1].x) * (corners[4].y - corners[1].y)
+        - (corners[4].x - corners[1].x) * (corners[2].y - corners[1].y)
+    local winding = det >= 0 and 1 or -1
+
+    local range = math.max(state.overlay_max_dist or 400, 50)
+    local style = state.overlay_style or 'solid'
+
+    -------------------------------------- faces (preenchimento)
+    if Draw.shape and state.overlay_faces ~= false and style ~= 'wire' then
+        local faces = {}
+        local function push(p1, p2, p3, p4, dist, alpha)
+            if p1 and p2 and p3 and p4 then
+                faces[#faces + 1] = { p1, p2, p3, p4, dist, alpha }
+            end
+        end
+
+        local d1 = dist2d(corners[1].x, corners[1].y, camx, camy)
+        local d2 = dist2d(corners[2].x, corners[2].y, camx, camy)
+        local d3 = dist2d(corners[3].x, corners[3].y, camx, camy)
+        local d4 = dist2d(corners[4].x, corners[4].y, camx, camy)
+        local avg_all = (d1 + d2 + d3 + d4) / 4
+
+        -- base e topo (no estilo vidro aparecem sempre, para dar volume)
+        if inside_any or style == 'glass' or camz < z1 then
+            push(bottom[1], bottom[2], bottom[3], bottom[4], avg_all, selected and 80 or 55)
+        end
+        if inside_any or style == 'glass' or camz > z2 then
+            push(top[1], top[2], top[3], top[4], avg_all, selected and 55 or 35)
+        end
+
+        -- paredes: em 'solid' so as que estao viradas para a camera
+        -- (o lado de fora da parede, calculado pela orientacao dos cantos)
+        local wall_dist = { d1, d2, d3, d4 }
+        for i = 1, 4 do
+            local j = (i % 4) + 1
+            if bottom[i] and bottom[j] and top[i] and top[j] then
+                local facing = wall_faces_camera(corners[i].x, corners[i].y, corners[j].x, corners[j].y,
+                    camx, camy, winding)
+                if inside_any or style == 'glass' or facing then
+                    local alpha = inside_any and 40 or (selected and 90 or 65)
+                    if not facing then alpha = ctrunc(alpha * 0.45) end
+                    push(bottom[i], bottom[j], top[j], top[i], (wall_dist[i] + wall_dist[j]) / 2, alpha)
+                end
+            end
+        end
+
+        -- desenha de tras para frente (ordem de pintura = profundidade)
+        table.sort(faces, function(a, b) return a[5] > b[5] end)
+        for _, f in ipairs(faces) do
+            local t = math.min(f[5] / range, 1)
+            local alpha = ctrunc(f[6] * (1 - 0.7 * t))
+            if alpha > 4 then
+                draw_quad(f[1], f[2], f[3], f[4], argb(r, g, b, alpha), f[5])
+            end
+        end
+    end
+
+    -------------------------------------- contornos
+    local function edge_color(dist, base_alpha)
+        local t = math.min(dist / range, 1)
+        return argb(r, g, b, ctrunc(base_alpha * (1 - 0.55 * t)))
+    end
+
+    local alpha = selected and 255 or (player_inside and 230 or 190)
+    local thickness = selected and 3 or 2
     local edges = 0
     for i = 1, 4 do
         local j = (i % 4) + 1
+        local d = (dist2d(corners[i].x, corners[i].y, camx, camy) + dist2d(corners[j].x, corners[j].y, camx, camy)) / 2
         if bottom[i] and bottom[j] then
-            draw_line(bottom[i][1], bottom[i][2], bottom[j][1], bottom[j][2], color, width)
+            draw_line(bottom[i][1], bottom[i][2], bottom[j][1], bottom[j][2], edge_color(d, alpha), thickness)
             edges = edges + 1
         end
         if top[i] and top[j] then
-            draw_line(top[i][1], top[i][2], top[j][1], top[j][2], color, width)
+            draw_line(top[i][1], top[i][2], top[j][1], top[j][2], edge_color(d, ctrunc(alpha * 0.85)), thickness)
             edges = edges + 1
         end
-        if bottom[i] and top[i] then
-            draw_line(bottom[i][1], bottom[i][2], top[i][1], top[i][2], color, width)
-            edges = edges + 1
+        -- pilares: mais discretos, so para dar volume (opcional)
+        if state.overlay_pillars ~= false and bottom[i] and top[i] then
+            draw_line(bottom[i][1], bottom[i][2], top[i][1], top[i][2], edge_color(d, ctrunc(alpha * 0.55)), 1)
         end
     end
 
-    if state.show_ground and Draw.shape and bottom[1] and bottom[2] and bottom[3] and bottom[4] then
-        draw_quad(bottom[1][1], bottom[1][2], bottom[2][1], bottom[2][2],
-            bottom[3][1], bottom[3][2], bottom[4][1], bottom[4][2],
-            argb(r, g, b, selected and 55 or 25))
-    end
-
+    -------------------------------------- nome / distancia
     if state.show_labels and edges > 0 then
         local cx, cy = zone_center_world(z)
         local lx, ly = project_point(cx, cy, z2 + 2)
@@ -1214,36 +1329,48 @@ local function draw_zone_box(z, selected)
             draw_text(text, lx + 6, ly + 4, argb(r, g, b, 255))
         end
     end
+    return edges
 end
 
 local function build_overlay()
-    local drawn = 0
+    local cam = camera_position()
+    local camx = cam and cam.x or 0
+    local camy = cam and cam.y or 0
+
+    -- monta a lista de zonas visiveis...
+    local list = {}
     for i, z in ipairs(state.zones) do
-        if drawn >= 60 then break end
         if z.enabled and (not state.only_selected_overlay or i == state.selected) then
             local near = true
             if state.player and i ~= state.selected then
                 near = zone_distance_to(z, state.player.x, state.player.y, state.player.z) <= state.overlay_max_dist
             end
             if near then
-                draw_zone_box(z, i == state.selected)
-                drawn = drawn + 1
+                local cx, cy = zone_center_world(z)
+                list[#list + 1] = { z = z, selected = (i == state.selected),
+                    d = dist2d(cx, cy, camx, camy) }
             end
         end
     end
 
     if state.show_game_zones then
         for _, z in ipairs(state.game_zones) do
-            if drawn >= 120 then break end
             local near = true
             if state.player then
                 near = zone_distance_to(z, state.player.x, state.player.y, state.player.z) <= state.game_zone_radius
             end
             if near then
-                draw_zone_box(z, false)
-                drawn = drawn + 1
+                local cx, cy = zone_center_world(z)
+                list[#list + 1] = { z = z, selected = false, d = dist2d(cx, cy, camx, camy) }
             end
         end
+    end
+
+    -- ...e desenha de tras para frente (as zonas de longe primeiro)
+    table.sort(list, function(a, b) return a.d > b.d end)
+    local limit = math.min(#list, state.overlay_max_zones or 40)
+    for i = 1, limit do
+        draw_zone_box(list[i].z, list[i].selected, cam)
     end
 end
 
@@ -1303,13 +1430,17 @@ local function build_hud()
     end
 end
 
--- desenha tudo (chamado dentro de onD3DPresent)
+-- desenha tudo (chamado dentro do onD3DPresent)
 local function draw_present()
     if state.render_in_menu == false then
         local ok, paused = pcall(isPauseMenuActive)
         if ok and paused then return end
     end
-    local mul = state.ui_show and 0.45 or 1.0
+
+    -- nosso desenho sai por cima do menu do ImGui (a ordem dos eventos), entao
+    -- com o menu aberto o overlay/HUD so aparece se o usuario quiser
+    if state.ui_show and state.overlay_with_menu == false then return end
+    local mul = state.ui_show and 0.5 or 1.0
 
     for _, b in ipairs(Draw.boxes) do
         pcall(renderDrawBox, b[1], b[2], b[3], b[4], fade(b[5], mul))
@@ -1355,9 +1486,26 @@ end
 
 --=============================================================================
 -- INTERFACE (Moon ImGui)
+--
+-- REGRA DE OURO: todo Begin/BeginChild tem o seu End/EndChild, SEMPRE - mesmo
+-- se uma secao der erro. Se o ImGui ficar com uma janela pendurada na pilha o
+-- jogo trava com "Mismatched Begin()/End() calls" (assertion failed). Por isso
+-- cada secao roda dentro de pcall e o End/EndChild e chamado fora dele.
 --=============================================================================
 local save_config, load_config
 local new_zone_at_player
+local set_ui, toggle_ui          -- definidas mais abaixo (usadas no cabecalho)
+
+local PAGES = {
+    { id = 1, name = ' Zonas ' },
+    { id = 2, name = ' Exportar ' },
+    { id = 3, name = ' Jogo ' },
+    { id = 4, name = ' Config ' },
+    { id = 5, name = ' Ajuda ' },
+}
+
+-- o binding de Columns nem sempre existe/funciona em todas as builds
+local columns_ok = type(imgui.Columns) == 'function'
 
 local ui = {
     show = nil,
@@ -1367,7 +1515,31 @@ local ui = {
     bools = {},
     export_path = nil,
     import_path = nil,
+    page = 1,
+    error = nil,
+    error_count = 0,
 }
+
+local function ui_error(where, err)
+    ui.error = string.format('%s: %s', where, tostring(err))
+    ui.error_count = ui.error_count + 1
+    log('erro na interface (%s): %s', where, tostring(err))
+end
+
+-- roda uma parte da interface protegida: um erro aqui nao derruba o resto
+local function ui_section(where, fn)
+    local ok, err = pcall(fn)
+    if not ok then ui_error(where, err) end
+    return ok
+end
+
+-- child window com EndChild garantido
+local function ui_child(name, size, fn)
+    local open = imgui.BeginChild(name, size, true)
+    local ok, err = pcall(function() if open then fn() end end)
+    imgui.EndChild()
+    if not ok then ui_error(name, err) end
+end
 
 local function read_buffer(buf)
     local ok, v = pcall(function() return buf.v end)
@@ -1409,9 +1581,10 @@ local function ui_bool(key, value)
     return b
 end
 
--- devolve value, mudou
+-- devolve value, mudou  (o Im* guarda o valor editado pelo ImGui)
 local function drag_float(key, label, value, speed, vmin, vmax, fmt)
     local f = ui_float(key, value)
+    value = tonumber(value) or 0
     if not imgui.IsItemActive() and math.abs((tonumber(f.v) or value) - value) > 0.0005 then
         f.v = value
     end
@@ -1423,6 +1596,7 @@ end
 
 local function slider_int(key, label, value, vmin, vmax)
     local i = ui_int(key, value)
+    value = ctrunc(value)
     if not imgui.IsItemActive() and (tonumber(i.v) or value) ~= value then i.v = value end
     if imgui.SliderInt(label .. '##' .. key, i, vmin, vmax) then
         return tonumber(i.v) or value, true
@@ -1454,6 +1628,14 @@ local function button(label, width)
     return imgui.Button(label)
 end
 
+local function same_line()
+    imgui.SameLine(0, 6)
+end
+
+local function text_colored(text, r, g, b)
+    imgui.TextColored(imgui.ImVec4(r, g, b, 1.0), text)
+end
+
 local function set_export_path(path)
     ui.export_path = path
     local b = ui.bufs['export_path']
@@ -1476,157 +1658,154 @@ function new_zone_at_player()
     return z
 end
 
+--=============================================================================
+-- partes da interface
+--=============================================================================
 local function ui_header()
-    local live = checkbox('live_apply', 'Aplicar no jogo', state.live_apply)
-    if live ~= nil then state.live_apply = live MarkLiveDirty() end
-    imgui.SameLine()
-    local ov = checkbox('overlays', 'Overlay 3D', state.overlays)
-    if ov ~= nil then state.overlays = ov end
-    imgui.SameLine()
-    local hud = checkbox('hud', 'HUD', state.hud)
-    if hud ~= nil then state.hud = hud end
-    imgui.SameLine()
-    if button('Nova zona no player', 150) then new_zone_at_player() end
-
-    if not Game.ok then
-        imgui.TextColored(imgui.ImVec4(1.0, 0.65, 0.30, 1.0),
-            'Memoria do jogo: OFF (' .. tostring(Game.error or '?') .. ') - so exportacao de IPL')
-    end
+    -- linha 1: atalho + status rapido
+    text_colored(string.format('Abrir: segure %s + %s   |   Fechar: X da janela',
+        key_name(state.open_combo[1]), key_name(state.open_combo[2])), 0.62, 0.80, 1.0)
 
     local p = state.player
-    if p then
-        imgui.Text(string.format('Jogador: %.1f, %.1f, %.1f   |   Zonas: %d   |   No jogo: %d',
-            p.x, p.y, p.z, #state.zones, Game.applied))
-    else
-        imgui.Text('Jogador: (carregando...)')
-    end
-
     local st = Game.last_status
-    if st then
-        imgui.Text(string.format('Clima: %s (%d)   |   Flags no jogador: %s%s',
-            WEATHER_NAMES[st.weather] or '?', st.weather, flag_list(st.flags_player),
-            has_flag(st.flags_player, FLAG_NORAIN) and '  [SEM CHUVA]' or ''))
-    end
-
-    if state.last_msg ~= '' then
-        local c = state.last_msg_color
-        imgui.TextColored(imgui.ImVec4(c.r / 255, c.g / 255, c.b / 255, 1.0), state.last_msg)
-    end
-end
-
-local function ui_flags(z)
-    imgui.Separator()
-    imgui.Text('Flags (atributos da zona)')
-    if button('Sem chuva', 100) then z.flags = FLAG_NORAIN MarkLiveDirty() end
-    imgui.SameLine()
-    if button('Sem chuva + audio', 150) then z.flags = bit.bor(FLAG_NORAIN, 0x0200) MarkLiveDirty() end
-    imgui.SameLine()
-    if button('Zona militar', 110) then z.flags = bit.bor(z.flags, 0x1000) MarkLiveDirty() end
-    imgui.SameLine()
-    if button('Limpar', 70) then z.flags = 0 MarkLiveDirty() end
-
-    if type(imgui.Columns) == 'function' then
-        imgui.Columns(2, 'czc_flags', false)
-        for _, f in ipairs(FLAGS) do
-            local res = checkbox('flag' .. f.bit, f.name, has_flag(z.flags, f.bit))
-            if res ~= nil then
-                if res then
-                    z.flags = bit.bor(z.flags, f.bit)
-                else
-                    z.flags = bit.band(z.flags, bit.bxor(FLAG_ALL, f.bit))
-                end
-                MarkLiveDirty()
-            end
-            if imgui.IsItemHovered() then
-                imgui.SetTooltip(string.format('%s\n\nbit 0x%04X', f.desc, f.bit))
-            end
-            imgui.NextColumn()
-        end
-        imgui.Columns(1)
+    local parts = {}
+    if p then
+        parts[#parts + 1] = string.format('Jogador %.0f, %.0f, %.0f', p.x, p.y, p.z)
     else
-        for _, f in ipairs(FLAGS) do
-            local res = checkbox('flag' .. f.bit, f.name, has_flag(z.flags, f.bit))
-            if res ~= nil then
-                if res then
-                    z.flags = bit.bor(z.flags, f.bit)
-                else
-                    z.flags = bit.band(z.flags, bit.bxor(FLAG_ALL, f.bit))
-                end
-                MarkLiveDirty()
-            end
-        end
+        parts[#parts + 1] = 'Jogador: (carregando...)'
+    end
+    parts[#parts + 1] = 'zonas: ' .. #state.zones
+    local live_txt = 'off'
+    if state.live_apply then
+        live_txt = Game.ok and (Game.applied .. ' no jogo') or 'sem memoria'
+    end
+    parts[#parts + 1] = 'live: ' .. live_txt
+    if st then
+        parts[#parts + 1] = string.format('clima %s%s', WEATHER_NAMES[st.weather] or '?',
+            has_flag(st.flags_player, FLAG_NORAIN) and ' (SEM CHUVA)' or '')
+    end
+    imgui.Text(table.concat(parts, '   |   '))
+
+    if not Game.ok then
+        text_colored('Memoria do jogo: OFF (' .. tostring(Game.error or '?') ..
+            ') - a zona funciona no jogo, mas o live apply esta desligado', 1.0, 0.65, 0.30)
     end
 
-    local v, changed = slider_int('flags_int', 'Flags (decimal)', bit.band(ctrunc(z.flags), FLAG_ALL), 0, FLAG_ALL)
-    if changed then z.flags = bit.band(v, FLAG_ALL) MarkLiveDirty() end
-    imgui.SameLine()
-    imgui.Text(string.format('= 0x%04X (%s)', bit.band(ctrunc(z.flags), FLAG_ALL), flag_list(z.flags)))
-end
-
--- tudo o que antes era tecla agora e botao aqui dentro
-local function ui_actions()
-    imgui.Text('Acoes')
-    -- linha 1: criar zona e ligar/desligar o que aparece na tela
+    -- linha 3: acoes principais, sempre a mao
     if button('Nova zona no player', 170) then new_zone_at_player() end
-    imgui.SameLine()
+    same_line()
     if button('Aplicar no jogo: ' .. (state.live_apply and 'ON' or 'OFF'), 180) then
         state.live_apply = not state.live_apply
         MarkLiveDirty()
         msg('Aplicar no jogo: ' .. (state.live_apply and 'LIGADO' or 'DESLIGADO'), 140, 220, 255)
     end
-    imgui.SameLine()
-    if button('Overlay 3D + HUD: ' .. (state.overlays and 'ON' or 'OFF'), 180) then
+    same_line()
+    if button('Overlay 3D + HUD: ' .. (state.overlays and 'ON' or 'OFF'), 185) then
         state.overlays = not state.overlays
         state.hud = state.overlays
-        msg('Overlay 3D + HUD: ' .. (state.overlays and 'LIGADO' or 'DESLIGADO'), 140, 220, 255)
     end
-    -- linha 2: exportar / importar / salvar / fechar
-    if button('Exportar IPL', 120) then
-        export_ipl(ui.export_path or EXPORT_FILE)
-    end
-    imgui.SameLine()
-    if button('Pacote ModLoader', 140) then
-        export_modloader_package(dirname(ui.export_path or EXPORT_FILE or '') or EXPORT_DIR)
-    end
-    imgui.SameLine()
-    if button('Ler zonas do jogo', 140) then
-        local n = scan_game_zones(state.player and state.player.x, state.player and state.player.y)
-        msg(string.format('%d zona(s) lida(s) da memoria do jogo.', n), 140, 220, 255)
-    end
-    imgui.SameLine()
-    if button('Salvar config', 120) then save_config() end
-    imgui.SameLine()
+    same_line()
     if button('Fechar menu (X)', 140) then set_ui(false) end
-    imgui.Text('Abrir o menu: segure ' .. key_name(state.open_combo[1]) .. ' + ' ..
-        key_name(state.open_combo[2]) .. '  (configuravel em Configuracoes)')
+
+    if state.last_msg ~= '' then
+        local c = state.last_msg_color
+        text_colored(state.last_msg, c.r / 255, c.g / 255, c.b / 255)
+    end
+    if ui.error then
+        text_colored('ERRO: ' .. ui.error, 1.0, 0.45, 0.45)
+        same_line()
+        if button('limpar##clearerr', 70) then ui.error = nil end
+    end
+end
+
+local function ui_page_bar()
+    for _, pg in ipairs(PAGES) do
+        if imgui.Selectable(pg.name .. '##page' .. pg.id, ui.page == pg.id) then
+            ui.page = pg.id
+        end
+        same_line()
+    end
+    imgui.NewLine()
+end
+
+local function ui_flags(z)
+    imgui.Text('Flags (atributos da zona)')
+    if button('Sem chuva', 100) then z.flags = FLAG_NORAIN MarkLiveDirty() end
+    same_line()
+    if button('Sem chuva + audio interno', 170) then z.flags = bit.bor(FLAG_NORAIN, 0x0200) MarkLiveDirty() end
+    same_line()
+    if button('Zona militar', 110) then z.flags = bit.bor(z.flags, 0x1000) MarkLiveDirty() end
+    same_line()
+    if button('Limpar', 70) then z.flags = 0 MarkLiveDirty() end
+
+    local function flag_checkbox(f)
+        local res = checkbox('flag' .. f.bit, f.name, has_flag(z.flags, f.bit))
+        if res ~= nil then
+            if res then
+                z.flags = bit.bor(z.flags, f.bit)
+            else
+                z.flags = bit.band(z.flags, bit.bxor(FLAG_ALL, f.bit))
+            end
+            MarkLiveDirty()
+        end
+        if imgui.IsItemHovered() then imgui.SetTooltip(f.desc) end
+    end
+
+    -- duas colunas, se o binding de Columns existir e funcionar
+    local used_columns = false
+    if columns_ok then
+        local okc = pcall(function()
+            imgui.Columns(2, 'czc_flags', false)
+            for _, f in ipairs(FLAGS) do
+                flag_checkbox(f)
+                imgui.NextColumn()
+            end
+            imgui.Columns(1)
+        end)
+        if okc then
+            used_columns = true
+        else
+            columns_ok = false
+            log('Columns do ImGui falhou - usando uma coluna')
+        end
+    end
+    if not used_columns then
+        for _, f in ipairs(FLAGS) do flag_checkbox(f) end
+    end
+
+    local v, changed = slider_int('flags_int', 'Flags (decimal)', bit.band(ctrunc(z.flags), FLAG_ALL), 0, FLAG_ALL)
+    if changed then z.flags = bit.band(v, FLAG_ALL) MarkLiveDirty() end
+    same_line()
+    imgui.Text(string.format('= 0x%04X (%s)', bit.band(ctrunc(z.flags), FLAG_ALL), flag_list(z.flags)))
 end
 
 local function ui_editor()
     local z = selected_zone()
     if not z then
         imgui.Text('Nenhuma zona na lista.')
-        if button('Criar zona na posicao do jogador', 300) then new_zone_at_player() end
+        if button('Criar zona na posicao do jogador', 260) then new_zone_at_player() end
         return
     end
 
     local name, changed_name = input_text('zone_name', 'Nome', z.name, 64)
     if changed_name then z.name = name end
-    imgui.SameLine()
+    same_line()
     local en = checkbox('zone_enabled', 'Ativa', z.enabled)
     if en ~= nil then z.enabled = en MarkLiveDirty() end
-    imgui.SameLine()
+    same_line()
     local lv = checkbox('zone_live', 'Ao vivo', z.live ~= false)
     if lv ~= nil then z.live = lv MarkLiveDirty() end
 
     imgui.Separator()
+    local v, changed
     imgui.Text('Centro (mundo)')
-    local v, changed = drag_float('cz_cx', 'X', z.cx, 1.0, -6000, 6000, '%.2f')
+    v, changed = drag_float('cz_cx', 'X', z.cx, 1.0, -6000, 6000, '%.2f')
     if changed then z.cx = v MarkLiveDirty() end
-    imgui.SameLine()
+    same_line()
     v, changed = drag_float('cz_cy', 'Y', z.cy, 1.0, -6000, 6000, '%.2f')
     if changed then z.cy = v MarkLiveDirty() end
-    imgui.SameLine()
-    if button('Usar posicao do jogador', 200) and state.player then
+    same_line()
+    if button('Usar posicao do jogador', 190) and state.player then
         z.cx, z.cy = state.player.x, state.player.y
         MarkLiveDirty()
     end
@@ -1636,56 +1815,47 @@ local function ui_editor()
     local v2, v3, v4
     local ch1, ch2, ch3
     v2, ch1 = drag_float('cz_hx', 'Meia largura X', hx, 0.5, 0.5, 3000, '%.2f')
-    imgui.SameLine()
+    same_line()
     v3, ch2 = drag_float('cz_hy', 'Meia altura Y', hy, 0.5, 0.5, 3000, '%.2f')
-    imgui.SameLine()
+    same_line()
     v4, ch3 = drag_float('cz_ang', 'Rotacao (graus)', ang, 0.5, -90, 90, '%.2f')
     if ch1 or ch2 or ch3 then
         local nat = view_to_native(v2, v3, v4)
         z.hw, z.hl, z.sx, z.sy = nat.hw, nat.hl, nat.sx, nat.sy
         MarkLiveDirty()
     end
-    imgui.SameLine()
-    if button('Zerar rotacao', 120) then
-        z.sx, z.sy = 0, 0
-        MarkLiveDirty()
-    end
+    same_line()
+    if button('Zerar rotacao', 120) then z.sx, z.sy = 0, 0 MarkLiveDirty() end
     imgui.Text(string.format('Campos do IPL: Width=%.3f  Length=%.3f  Unknown1=%.3f  Unknown2=%.3f',
         z.hw, z.hl, z.sx, z.sy))
 
     imgui.Text('Altura (Z absoluto do mundo)')
     v, changed = drag_float('cz_zb', 'Bottom', z.zb, 0.5, -200, 1500, '%.2f')
     if changed then z.zb = v MarkLiveDirty() end
-    imgui.SameLine()
+    same_line()
     v, changed = drag_float('cz_zt', 'Top', z.zt, 0.5, -200, 2000, '%.2f')
     if changed then z.zt = v MarkLiveDirty() end
-    imgui.SameLine()
+    same_line()
     if button('Z do jogador (-2 / +25)', 190) and state.player then
         z.zb, z.zt = ctrunc(state.player.z) - 2, ctrunc(state.player.z) + 25
         MarkLiveDirty()
     end
 
-    ui_flags(z)
-
     imgui.Separator()
-    if type(imgui.CollapsingHeader) == 'function' then
-        if imgui.CollapsingHeader('Espelho (experimental)') then
-            local mir = checkbox('zone_mirror', 'Usar como zona de espelho', z.mirror)
-            if mir ~= nil then z.mirror = mir MarkLiveDirty() end
-            if z.mirror then
-                v, changed = drag_float('cz_cm', 'Cm (posicao do plano)', z.cm, 1.0, -6000, 6000, '%.3f')
-                if changed then z.cm = v MarkLiveDirty() end
-                v, changed = drag_float('cz_vx', 'Vx', z.vx, 1.0, -1, 1, '%.0f')
-                if changed then z.vx = ctrunc(v) MarkLiveDirty() end
-                imgui.SameLine()
-                v, changed = drag_float('cz_vy', 'Vy', z.vy, 1.0, -1, 1, '%.0f')
-                if changed then z.vy = ctrunc(v) MarkLiveDirty() end
-                imgui.SameLine()
-                v, changed = drag_float('cz_vz', 'Vz', z.vz, 1.0, -1, 1, '%.0f')
-                if changed then z.vz = ctrunc(v) MarkLiveDirty() end
-                imgui.Text('Vx/Vy/Vz definem qual face do box reflete (normalmente -1 ou 1 em um eixo).')
-                imgui.Text('No live apply o espelho usa o formato do motor (Cm em float).')
-            end
+    if imgui.CollapsingHeader('Espelho (experimental)##mirror') then
+        local mir = checkbox('zone_mirror', 'Usar como zona de espelho', z.mirror)
+        if mir ~= nil then z.mirror = mir MarkLiveDirty() end
+        if z.mirror then
+            v, changed = drag_float('cz_cm', 'Cm (posicao do plano)', z.cm, 1.0, -6000, 6000, '%.3f')
+            if changed then z.cm = v MarkLiveDirty() end
+            v, changed = drag_float('cz_vx', 'Vx', z.vx, 1.0, -1, 1, '%.0f')
+            if changed then z.vx = ctrunc(v) MarkLiveDirty() end
+            same_line()
+            v, changed = drag_float('cz_vy', 'Vy', z.vy, 1.0, -1, 1, '%.0f')
+            if changed then z.vy = ctrunc(v) MarkLiveDirty() end
+            same_line()
+            v, changed = drag_float('cz_vz', 'Vz', z.vz, 1.0, -1, 1, '%.0f')
+            if changed then z.vz = ctrunc(v) MarkLiveDirty() end
         end
     end
 
@@ -1693,47 +1863,55 @@ local function ui_editor()
     local comment, changed_comment = input_text('zone_comment', 'Comentario (# no IPL)', z.comment, 128)
     if changed_comment then z.comment = comment end
     imgui.Text('Linha do IPL:')
-    imgui.TextColored(imgui.ImVec4(0.55, 0.85, 1.0, 1.0), ipl_line(z, true))
+    text_colored(ipl_line(z, true), 0.55, 0.85, 1.0)
     if button('Copiar linha', 110) then
         if copy_text(ipl_line(z, true)) then msg('Linha copiada.', 140, 220, 255) end
     end
-    imgui.SameLine()
+    same_line()
     if button('Duplicar zona', 120) then
         local copy = new_zone(z)
         copy.name = z.name .. ' (copia)'
         copy.cx = z.cx + 5
         add_zone(copy)
     end
-    imgui.SameLine()
+    same_line()
     if button('Ir para a zona', 120) then
         local cx, cy, cz = zone_center_world(z)
         local ok = pcall(setCharCoordinates, PLAYER_PED, cx, cy, math.max(cz, z.zb) + 1.5)
         if ok then msg('Teleportado para a zona.', 140, 220, 255) end
     end
+    same_line()
+    if button('Remover zona', 120) then
+        table.remove(state.zones, state.selected)
+        if state.selected > #state.zones then state.selected = math.max(1, #state.zones) end
+        MarkLiveDirty()
+        msg('Zona removida.', 255, 190, 120)
+    end
 end
 
 local function ui_list()
     imgui.Text('Lista de zonas (' .. #state.zones .. ')')
-    imgui.BeginChild('czc_list', imgui.ImVec2(0, 130), true)
     local remove
-    for i, z in ipairs(state.zones) do
-        local label = string.format('%s%d. %s [%s]%s', (i == state.selected) and '> ' or '', i,
-            z.name, flag_list(z.flags), z.enabled and '' or ' (off)')
-        if imgui.Selectable(label .. '##sel' .. i, i == state.selected) then
-            state.selected = i
-        end
-        imgui.SameLine(0, 260)
-        if button('^##up' .. i, 26) then
-            if i > 1 then
-                state.zones[i], state.zones[i - 1] = state.zones[i - 1], state.zones[i]
-                state.selected = i - 1
-                MarkLiveDirty()
+    ui_child('czc_list', imgui.ImVec2(0, 110), function()
+        for i, z in ipairs(state.zones) do
+            -- os botoes vem primeiro: assim o X fica sempre no mesmo lugar,
+            -- sem depender do tamanho do nome da zona
+            if button('X##del' .. i, 24) then remove = i end
+            same_line()
+            if button('^##up' .. i, 24) then
+                if i > 1 then
+                    state.zones[i], state.zones[i - 1] = state.zones[i - 1], state.zones[i]
+                    state.selected = i - 1
+                    MarkLiveDirty()
+                end
+            end
+            same_line()
+            if imgui.Selectable(string.format('%d. %s [%s]%s##sel%d', i, z.name, flag_list(z.flags),
+                z.enabled and '' or ' (off)', i), i == state.selected) then
+                state.selected = i
             end
         end
-        imgui.SameLine()
-        if button('X##del' .. i, 26) then remove = i end
-    end
-    imgui.EndChild()
+    end)
     if remove then
         table.remove(state.zones, remove)
         if state.selected > #state.zones then state.selected = math.max(1, #state.zones) end
@@ -1742,246 +1920,321 @@ local function ui_list()
     end
 end
 
-local function ui_io()
-    imgui.Separator()
-    imgui.Text('Exportar / Importar IPL')
-    local path = ui.export_path or EXPORT_FILE or 'cull.ipl'
-    local newpath, chp = input_text('export_path', 'Arquivo IPL', path, 260)
-    if chp then ui.export_path = newpath end
-
-    local en = checkbox('only_enabled', 'Somente zonas ativas', state.only_enabled)
-    if en ~= nil then state.only_enabled = en end
-    imgui.SameLine()
-    local pc = checkbox('per_zone_comments', 'Comentario por zona', state.per_zone_comments)
-    if pc ~= nil then state.per_zone_comments = pc end
-    imgui.SameLine()
-    local mi = checkbox('include_mirror_export', 'Exportar espelhos', state.include_mirror_export)
-    if mi ~= nil then state.include_mirror_export = mi end
-
-    if button('Exportar IPL', 130) then export_ipl(ui.export_path or path) end
-    imgui.SameLine()
-    if button('Pacote ModLoader', 150) then
-        export_modloader_package(dirname(ui.export_path or path or '') or EXPORT_DIR)
-    end
-    imgui.SameLine()
-    if button('Copiar IPL', 110) then
-        local text, n = build_ipl_text(state.zones, { only_enabled = state.only_enabled,
-            per_zone_comments = state.per_zone_comments, include_mirror = state.include_mirror_export })
-        if copy_text(text) then
-            msg(string.format('%d zona(s) copiada(s) para o clipboard.', n), 140, 220, 255)
+local function ui_page_zones()
+    ui_child('czc_page_zonas', imgui.ImVec2(0, 0), function()
+        ui_list()
+        imgui.Separator()
+        ui_editor()
+        local z = selected_zone()
+        if z then
+            imgui.Separator()
+            ui_flags(z)
         end
-    end
-    if EXPORT_DIR then imgui.Text('Pasta: ' .. EXPORT_DIR) end
+    end)
+end
 
-    local ipath = ui.import_path or (EXPORT_DIR and join(EXPORT_DIR, 'cull.ipl') or '')
-    local nip, chi = input_text('import_path', 'Importar de', ipath, 260)
-    if chi then ui.import_path = nip end
-    if button('Importar arquivo', 140) then import_from_file(ui.import_path or ipath) end
-    imgui.SameLine()
-    if button('Colar do clipboard', 150) then
-        local text
-        if type(getClipboardText) == 'function' then
-            local ok, t = pcall(getClipboardText)
-            if ok then text = t end
+local function ui_page_export()
+    ui_child('czc_page_export', imgui.ImVec2(0, 0), function()
+        imgui.Text('Exportar')
+        local path = ui.export_path or EXPORT_FILE or 'cull.ipl'
+        local newpath, chp = input_text('export_path', 'Arquivo IPL', path, 260)
+        if chp then ui.export_path = newpath end
+
+        local en = checkbox('only_enabled', 'Somente zonas ativas', state.only_enabled)
+        if en ~= nil then state.only_enabled = en end
+        same_line()
+        local pc = checkbox('per_zone_comments', 'Comentario por zona', state.per_zone_comments)
+        if pc ~= nil then state.per_zone_comments = pc end
+        same_line()
+        local mi = checkbox('include_mirror_export', 'Exportar espelhos', state.include_mirror_export)
+        if mi ~= nil then state.include_mirror_export = mi end
+
+        if button('Exportar IPL', 130) then export_ipl(ui.export_path or path) end
+        same_line()
+        if button('Pacote ModLoader', 150) then
+            export_modloader_package(dirname(ui.export_path or path or '') or EXPORT_DIR)
         end
-        if text and #text > 0 then
-            import_from_text(text)
+        same_line()
+        if button('Copiar IPL', 110) then
+            local text, n = build_ipl_text(state.zones, { only_enabled = state.only_enabled,
+                per_zone_comments = state.per_zone_comments, include_mirror = state.include_mirror_export })
+            if copy_text(text) then
+                msg(string.format('%d zona(s) copiada(s) para o clipboard.', n), 140, 220, 255)
+            end
+        end
+        if EXPORT_DIR then imgui.TextWrapped('Pasta: ' .. EXPORT_DIR) end
+
+        imgui.Separator()
+        imgui.Text('Importar')
+        local ipath = ui.import_path or (EXPORT_DIR and join(EXPORT_DIR, 'cull.ipl') or '')
+        local nip, chi = input_text('import_path', 'Arquivo IPL de entrada', ipath, 260)
+        if chi then ui.import_path = nip end
+        if button('Importar arquivo', 140) then import_from_file(ui.import_path or ipath) end
+        same_line()
+        if button('Colar do clipboard', 150) then
+            local text
+            if type(getClipboardText) == 'function' then
+                local ok, t = pcall(getClipboardText)
+                if ok then text = t end
+            end
+            if text and #text > 0 then
+                import_from_text(text)
+            else
+                msg('Nao consegui ler o clipboard.', 255, 180, 90)
+            end
+        end
+        same_line()
+        if button('Exemplo', 80) then
+            local z = new_zone()
+            z.name = 'Exemplo - sem chuva'
+            z.flags = FLAG_NORAIN
+            add_zone(z)
+            msg('Zona de exemplo adicionada.', 140, 220, 255)
+        end
+        imgui.TextWrapped('O jogo le o IPL quando carrega o mapa. Para testar na hora, ligue "Aplicar no jogo".')
+    end)
+end
+
+local function ui_page_game()
+    ui_child('czc_page_game', imgui.ImVec2(0, 0), function()
+        imgui.Text('Zonas de cull que o jogo ja tem carregadas (leitura da memoria)')
+        local show = checkbox('show_game_zones', 'Mostrar no overlay', state.show_game_zones)
+        if show ~= nil then state.show_game_zones = show end
+        same_line()
+        local auto = checkbox('auto_scan_game', 'Ler automaticamente', state.auto_scan_game)
+        if auto ~= nil then state.auto_scan_game = auto end
+        local r = slider_int('gz_radius', 'Raio de leitura (m)', state.game_zone_radius, 50, 2000)
+        state.game_zone_radius = r
+        same_line()
+        local m = slider_int('gz_max', 'Maximo', state.game_zone_max, 10, 400)
+        state.game_zone_max = m
+        if button('Ler agora', 110) then
+            local n = scan_game_zones(state.player and state.player.x, state.player and state.player.y)
+            msg(string.format('%d zona(s) lida(s) da memoria.', n), 140, 220, 255)
+        end
+        same_line()
+        if button('Copiar para a lista', 150) then import_from_game() end
+
+        local st = Game.last_status
+        imgui.Text(string.format('O jogo tem %d zonas (+%d espelhos) | lidas agora: %d',
+            st and st.attr_count or 0, st and st.mirror_count or 0, #state.game_zones))
+        if st then
+            imgui.Text(string.format('Flags aplicadas no jogador agora: %s', flag_list(st.flags_player)))
+        end
+        imgui.TextWrapped('Os espelhos (reflexo no chao) usam Cm/direcao. Copiar uma zona do jogo traz ela pronta para editar.')
+    end)
+end
+
+local function ui_page_config()
+    ui_child('czc_page_config', imgui.ImVec2(0, 0), function()
+        local changed
+        imgui.Text('Overlay 3D')
+        local lbl = checkbox('show_labels', 'Mostrar nomes', state.show_labels)
+        if lbl ~= nil then state.show_labels = lbl end
+        same_line()
+        local fac = checkbox('overlay_faces', 'Preencher faces (solido)', state.overlay_faces ~= false)
+        if fac ~= nil then state.overlay_faces = fac end
+        same_line()
+        local pil = checkbox('overlay_pillars', 'Pilares nas quinas', state.overlay_pillars ~= false)
+        if pil ~= nil then state.overlay_pillars = pil end
+        same_line()
+        local wm = checkbox('overlay_with_menu', 'Mostrar com o menu aberto', state.overlay_with_menu)
+        if wm ~= nil then state.overlay_with_menu = wm end
+
+        imgui.Text('Estilo:')
+        local styles = { { 'solid', ' Solido ' }, { 'glass', ' Vidro ' }, { 'wire', ' So contorno ' } }
+        for _, s in ipairs(styles) do
+            same_line()
+            if imgui.Selectable(s[2] .. '##style' .. s[1], (state.overlay_style or 'solid') == s[1]) then
+                state.overlay_style = s[1]
+                if s[1] == 'wire' then state.overlay_faces = false else state.overlay_faces = true end
+            end
+        end
+        local d = slider_int('ov_dist', 'Distancia maxima do overlay (m)', state.overlay_max_dist, 30, 2000)
+        state.overlay_max_dist = d
+        same_line()
+        local only = checkbox('only_sel', 'So a zona selecionada', state.only_selected_overlay)
+        if only ~= nil then state.only_selected_overlay = only end
+        local mz = slider_int('ov_max_zones', 'Maximo de zonas desenhadas', state.overlay_max_zones, 1, 120)
+        state.overlay_max_zones = mz
+        local v
+        v, changed = drag_float('ov_off_x', 'Ajuste fino X (px)', state.overlay_offset_x, 0.5, -200, 200, '%.1f')
+        if changed then state.overlay_offset_x = v end
+        same_line()
+        v, changed = drag_float('ov_off_y', 'Ajuste fino Y (px)', state.overlay_offset_y, 0.5, -200, 200, '%.1f')
+        if changed then state.overlay_offset_y = v end
+
+        local z = selected_zone()
+        if z then
+            imgui.Text('Cor da zona selecionada')
+            local rr = slider_int('col_r', 'R', z.color.r, 0, 255)
+            if rr ~= z.color.r then z.color.r = rr end
+            same_line()
+            local gg = slider_int('col_g', 'G', z.color.g, 0, 255)
+            if gg ~= z.color.g then z.color.g = gg end
+            same_line()
+            local bb = slider_int('col_b', 'B', z.color.b, 0, 255)
+            if bb ~= z.color.b then z.color.b = bb end
+        end
+
+        imgui.Separator()
+        imgui.Text('HUD')
+        local hud = checkbox('hud', 'Mostrar HUD', state.hud)
+        if hud ~= nil then state.hud = hud end
+        same_line()
+        local ov = checkbox('overlays', 'Mostrar overlay das zonas', state.overlays)
+        if ov ~= nil then state.overlays = ov end
+        same_line()
+        local rim = checkbox('render_in_menu', 'Desenhar no menu de pausa', state.render_in_menu)
+        if rim ~= nil then state.render_in_menu = rim end
+        local fh = slider_int('font_height', 'Tamanho da fonte do HUD', state.font_height, 6, 16)
+        if fh ~= state.font_height then
+            state.font_height = fh
+            font_dirty = true
+        end
+
+        imgui.Separator()
+        imgui.Text('Atalho do menu (segurar as duas teclas)')
+        local combo_on = checkbox('open_combo_enabled', 'Usar o atalho', state.open_combo_enabled)
+        if combo_on ~= nil then state.open_combo_enabled = combo_on end
+        same_line()
+        imgui.Text(string.format('   %s + %s', key_name(state.open_combo[1]), key_name(state.open_combo[2])))
+        if state.capture then
+            text_colored('Pressione a tecla para ' .. (state.capture == 'open1' and 'a 1a' or 'a 2a') ..
+                ' tecla do atalho (ESC cancela)...', 1.0, 0.85, 0.3)
         else
-            msg('Nao consegui ler o clipboard.', 255, 180, 90)
+            if button('Trocar 1a tecla', 130) then state.capture = 'open1' end
+            same_line()
+            if button('Trocar 2a tecla', 130) then state.capture = 'open2' end
+            same_line()
+            if button('Voltar para C + L', 140) then
+                state.open_combo = { vkeys.VK_C or 0x43, vkeys.VK_L or 0x4C }
+                msg('Atalho do menu: segure C + L', 140, 220, 255)
+            end
         end
-    end
-    imgui.SameLine()
-    if button('Exemplo', 80) then
-        local z = new_zone()
-        z.name = 'Exemplo - sem chuva'
-        z.flags = FLAG_NORAIN
-        add_zone(z)
-        msg('Zona de exemplo adicionada.', 140, 220, 255)
-    end
-    imgui.TextWrapped('O jogo le o IPL ao carregar o mapa. Para testar na hora use "Aplicar no jogo".')
-end
+        local lock = checkbox('lock_player', 'Travar os controles com o menu aberto', state.lock_player)
+        if lock ~= nil then state.lock_player = lock end
 
-local function ui_game_zones()
-    imgui.Separator()
-    imgui.Text('Zonas que ja existem no jogo (leitura da memoria)')
-    local show = checkbox('show_game_zones', 'Mostrar no overlay', state.show_game_zones)
-    if show ~= nil then state.show_game_zones = show end
-    imgui.SameLine()
-    local auto = checkbox('auto_scan_game', 'Ler automaticamente', state.auto_scan_game)
-    if auto ~= nil then state.auto_scan_game = auto end
-
-    local r
-    r = slider_int('gz_radius', 'Raio (m)', state.game_zone_radius, 50, 2000)
-    state.game_zone_radius = r
-    imgui.SameLine()
-    local m
-    m = slider_int('gz_max', 'Maximo', state.game_zone_max, 10, 400)
-    state.game_zone_max = m
-
-    if button('Ler agora', 110) then
-        local n = scan_game_zones(state.player and state.player.x, state.player and state.player.y)
-        msg(string.format('%d zona(s) lida(s) da memoria.', n), 140, 220, 255)
-    end
-    imgui.SameLine()
-    if button('Copiar para a lista', 150) then import_from_game() end
-    local st = Game.last_status
-    imgui.Text(string.format('O jogo tem %d zonas (+%d espelhos) | lidas agora: %d',
-        st and st.attr_count or 0, st and st.mirror_count or 0, #state.game_zones))
-    imgui.TextWrapped('Util para ver o que ja existe (ex.: interiores onde nunca chove) e copiar como base.')
-end
-
-local function ui_settings()
-    imgui.Separator()
-    imgui.Text('Configuracoes')
-    local lbl = checkbox('show_labels', 'Mostrar nomes', state.show_labels)
-    if lbl ~= nil then state.show_labels = lbl end
-    imgui.SameLine()
-    local gnd = checkbox('show_ground', 'Preencher area', state.show_ground)
-    if gnd ~= nil then state.show_ground = gnd end
-    imgui.SameLine()
-    local only = checkbox('only_sel', 'So a zona selecionada', state.only_selected_overlay)
-    if only ~= nil then state.only_selected_overlay = only end
-    local d
-    d = slider_int('ov_dist', 'Distancia maxima do overlay (m)', state.overlay_max_dist, 30, 2000)
-    state.overlay_max_dist = d
-    imgui.SameLine()
-    local rim = checkbox('render_in_menu', 'Desenhar no menu de pausa', state.render_in_menu)
-    if rim ~= nil then state.render_in_menu = rim end
-
-    local z = selected_zone()
-    if z then
-        local rr, c1 = slider_int('col_r', 'Cor R', z.color.r, 0, 255)
-        if c1 then z.color.r = rr end
-        imgui.SameLine()
-        local gg, c2 = slider_int('col_g', 'G', z.color.g, 0, 255)
-        if c2 then z.color.g = gg end
-        imgui.SameLine()
-        local bb, c3 = slider_int('col_b', 'B', z.color.b, 0, 255)
-        if c3 then z.color.b = bb end
-    end
-
-    imgui.Separator()
-    imgui.Text('Atalho para abrir o menu (segurar as duas teclas)')
-    local combo_on = checkbox('open_combo_enabled', 'Usar o atalho', state.open_combo_enabled)
-    if combo_on ~= nil then state.open_combo_enabled = combo_on end
-    imgui.SameLine()
-    imgui.Text(string.format('   %s + %s', key_name(state.open_combo[1]), key_name(state.open_combo[2])))
-    if state.capture then
-        imgui.TextColored(imgui.ImVec4(1.0, 0.85, 0.3, 1.0), 'Pressione a tecla para ' ..
-            (state.capture == 'open1' and 'a 1a' or 'a 2a') .. ' tecla do atalho (ESC cancela)...')
-    else
-        if button('Trocar 1a tecla', 130) then state.capture = 'open1' end
-        imgui.SameLine()
-        if button('Trocar 2a tecla', 130) then state.capture = 'open2' end
-        imgui.SameLine()
-        if button('Voltar para C + L', 140) then
-            state.open_combo = { vkeys.VK_C or 0x43, vkeys.VK_L or 0x4C }
-            msg('Atalho do menu: segure C + L', 140, 220, 255)
-        end
-    end
-    imgui.TextWrapped('Para fechar o menu, clique no X da janela (ou no botao "Fechar menu" em Acoes).')
-
-    local lock = checkbox('lock_player', 'Travar os controles com o menu aberto', state.lock_player)
-    if lock ~= nil then state.lock_player = lock end
-
-    if imgui.CollapsingHeader('Atalhos extras (opcional - o menu ja tem tudo)') then
-        local key_names = { 'menu', 'new_zone', 'live', 'overlay', 'export' }
-        local labels = { menu = 'Menu', new_zone = 'Nova zona', live = 'Live apply', overlay = 'Overlay/HUD', export = 'Exportar' }
-        local vks = { { 0, 'Nenhuma' }, { vkeys.VK_F1, 'F1' }, { vkeys.VK_F2, 'F2' }, { vkeys.VK_F3, 'F3' },
-            { vkeys.VK_F4, 'F4' }, { vkeys.VK_F5, 'F5' }, { vkeys.VK_F6, 'F6' }, { vkeys.VK_F7, 'F7' },
-            { vkeys.VK_F8, 'F8' }, { vkeys.VK_F9, 'F9' }, { vkeys.VK_F10, 'F10' }, { vkeys.VK_F11, 'F11' },
-            { vkeys.VK_F12, 'F12' } }
-        for _, key in ipairs(key_names) do
-            imgui.Text(labels[key] .. ':')
-            for _, vk in ipairs(vks) do
-                imgui.SameLine()
-                if imgui.Selectable(vk[2] .. '##k' .. key .. vk[1], state.keys[key] == vk[1]) then
-                    state.keys[key] = vk[1]
+        if imgui.CollapsingHeader('Atalhos extras (opcional - o menu ja tem tudo)##hotkeys') then
+            local key_names = { 'menu', 'new_zone', 'live', 'overlay', 'export' }
+            local labels = { menu = 'Menu', new_zone = 'Nova zona', live = 'Live apply',
+                overlay = 'Overlay/HUD', export = 'Exportar' }
+            local vks = { { 0, 'Nenhuma' }, { vkeys.VK_F1, 'F1' }, { vkeys.VK_F2, 'F2' },
+                { vkeys.VK_F3, 'F3' }, { vkeys.VK_F4, 'F4' }, { vkeys.VK_F5, 'F5' }, { vkeys.VK_F6, 'F6' },
+                { vkeys.VK_F7, 'F7' }, { vkeys.VK_F8, 'F8' }, { vkeys.VK_F9, 'F9' },
+                { vkeys.VK_F10, 'F10' }, { vkeys.VK_F11, 'F11' }, { vkeys.VK_F12, 'F12' } }
+            for _, key in ipairs(key_names) do
+                imgui.Text(labels[key] .. ':')
+                for _, vk in ipairs(vks) do
+                    same_line()
+                    if imgui.Selectable(vk[2] .. '##k' .. key .. vk[1], state.keys[key] == vk[1]) then
+                        state.keys[key] = vk[1]
+                    end
                 end
             end
         end
-        imgui.TextWrapped('Ex.: F8 = nova zona, sem precisar abrir o menu.')
-    end
 
-    imgui.Separator()
-    local fh
-    fh = slider_int('font_height', 'Tamanho da fonte do HUD', state.font_height, 6, 16)
-    if fh ~= state.font_height then
-        state.font_height = fh
-        font_dirty = true    -- a fonte e recriada no loop principal
-    end
-    imgui.SameLine()
-    local dry = checkbox('dry_run', 'Modo seguro (nao mexe na memoria)', state.dry_run)
-    if dry ~= nil then
-        state.dry_run = dry
-        if dry then
-            live_reset()
-            Game.ok = false
-            Game.error = 'modo seguro ligado'
-        else
-            init_memory()
+        imgui.Separator()
+        imgui.Text('Arquivos e memoria')
+        local dry = checkbox('dry_run', 'Modo seguro (nao mexe na memoria)', state.dry_run)
+        if dry ~= nil then
+            state.dry_run = dry
+            if dry then
+                live_reset()
+                Game.ok = false
+                Game.error = 'modo seguro ligado'
+            else
+                init_memory()
+            end
+            MarkLiveDirty()
         end
-        MarkLiveDirty()
-    end
-    imgui.SameLine()
-    local ap = checkbox('auto_pack', 'Atalho de exportar = pacote ModLoader', state.auto_pack_modloader)
-    if ap ~= nil then state.auto_pack_modloader = ap end
-    imgui.SameLine()
-    local al = checkbox('auto_load', 'Carregar save ao iniciar', state.auto_load_save)
-    if al ~= nil then state.auto_load_save = al end
+        same_line()
+        local ap = checkbox('auto_pack', 'Exportar pacote ModLoader', state.auto_pack_modloader)
+        if ap ~= nil then state.auto_pack_modloader = ap end
+        same_line()
+        local al = checkbox('auto_load', 'Carregar save ao iniciar', state.auto_load_save)
+        if al ~= nil then state.auto_load_save = al end
 
-    if button('Salvar config', 130) then save_config() end
-    imgui.SameLine()
-    if button('Carregar config', 130) then load_config() end
-    imgui.SameLine()
-    if button('Limpar lista', 110) then
-        state.zones = {}
-        state.selected = 1
-        MarkLiveDirty()
-        msg('Lista de zonas limpa.', 255, 190, 120)
-    end
-    if SAVE_FILE then imgui.Text('Save: ' .. SAVE_FILE) end
+        if button('Salvar config', 130) then save_config() end
+        same_line()
+        if button('Carregar config', 130) then load_config() end
+        same_line()
+        if button('Limpar lista', 110) then
+            state.zones = {}
+            state.selected = 1
+            MarkLiveDirty()
+            msg('Lista de zonas limpa.', 255, 190, 120)
+        end
+        if SAVE_FILE then imgui.TextWrapped('Save: ' .. SAVE_FILE) end
+    end)
 end
 
-local function ui_help()
-    imgui.Separator()
-    imgui.TextWrapped('ABRIR: segure ' .. key_name(state.open_combo[1]) .. ' + ' .. key_name(state.open_combo[2]) ..
-        '   |   FECHAR: clique no X da janela.')
-    imgui.TextWrapped('1) "Nova zona no player" cria a zona na sua posicao; ajuste centro, tamanho e altura (Z).')
-    imgui.TextWrapped('2) Marque NO_RAIN para a zona nao ter chuva (nem helicoptero de policia).')
-    imgui.TextWrapped('3) Com "Aplicar no jogo" ligado o efeito vale na hora - ande para dentro/fora para conferir.')
-    imgui.TextWrapped('4) Exporte o .ipl (ou o Pacote ModLoader) e registre no data\\gta.dat.')
-    imgui.Separator()
-    imgui.TextWrapped('O box da zona usa MEIO tamanho: 30 = 60x60 metros. Bottom/Top sao Z absolutos.')
-    imgui.TextWrapped('Cull zone de IPL so vale quando o jogo carrega o mapa - o live apply e so para testar.')
-    imgui.TextWrapped('Em jogo que nao seja 1.0 US, deixe o "Modo seguro" ligado: a memoria nao e tocada.')
+local function ui_page_help()
+    ui_child('czc_page_help', imgui.ImVec2(0, 0), function()
+        imgui.TextWrapped('ABRIR: segure ' .. key_name(state.open_combo[1]) .. ' + ' ..
+            key_name(state.open_combo[2]) .. '   |   FECHAR: clique no X da janela.')
+        imgui.Separator()
+        imgui.TextWrapped('1) Em "Zonas": clique em "Nova zona no player" - a posicao do jogador vira o centro da zona.')
+        imgui.TextWrapped('2) Ajuste o tamanho (meia largura X / meia altura Y, em metros) e a altura (Bottom/Top, Z do mundo).')
+        imgui.TextWrapped('3) Marque NO_RAIN para a zona nao ter chuva (e nem helicoptero de policia).')
+        imgui.TextWrapped('4) Com "Aplicar no jogo" ligado o efeito vale na hora: ande para dentro e para fora e olhe o HUD.')
+        imgui.TextWrapped('5) Em "Exportar": gere o .ipl (ou o Pacote ModLoader, que cria cull.ipl + gta.dat prontos).')
+        imgui.Separator()
+        imgui.TextWrapped('O overlay mostra a caixa da zona: as faces so ficam visiveis quando olhamos para o lado de fora ' ..
+            'delas (como uma caixa de verdade), e o que esta mais longe fica mais transparente. ' ..
+            'Ajuste o estilo em Config (Solido / Vidro / So contorno).')
+        imgui.Separator()
+        imgui.TextWrapped('O box usa MEIO tamanho: 30 = 60x60 metros. Bottom/Top sao Z absolutos do mundo.')
+        imgui.TextWrapped('Cull zone de IPL so vale quando o jogo carrega o mapa - o live apply e para testar na hora.')
+        imgui.TextWrapped('Em jogo que nao seja 1.0 US, deixe o "Modo seguro" ligado: a memoria nao e tocada.')
+    end)
 end
 
 local function build_ui()
     local sw, sh = screen_size()
-    local w = math.min(680, sw - 20)
-    local h = math.min(760, sh - 30)
+    local w = math.min(720, sw - 20)
+    local h = math.min(700, sh - 30)
     imgui.SetNextWindowSize(imgui.ImVec2(w, h), imgui.Cond.FirstUseEver)
     imgui.SetNextWindowPos(imgui.ImVec2(sw / 2 - w / 2, 15), imgui.Cond.FirstUseEver)
+
     local open = imgui.Begin('Cull Zone Creator v' .. VERSION, ui.show)
-    if open then
-        ui_header()
-        imgui.Separator()
-        ui_actions()
-        imgui.Separator()
-        imgui.BeginChild('czc_editor', imgui.ImVec2(0, math.max(150, h - 380)), true)
-        ui_editor()
-        imgui.EndChild()
-        ui_list()
-        ui_io()
-        ui_game_zones()
-        ui_settings()
-        ui_help()
-    end
-    imgui.End()
-    -- se o jogador fechou a janela no "X", mantem o estado em sincronia
+    local ok, err = pcall(function()
+        if not open then return end
+        ui_section('cabecalho', ui_header)
+        ui_section('paginas', ui_page_bar)
+        ui_section('pagina', function()
+            if ui.page == 1 then
+                ui_page_zones()
+            elseif ui.page == 2 then
+                ui_page_export()
+            elseif ui.page == 3 then
+                ui_page_game()
+            elseif ui.page == 4 then
+                ui_page_config()
+            else
+                ui_page_help()
+            end
+        end)
+    end)
+    -- o End() NUNCA pode ser pulado: e isso que evita o crash
+    -- "Mismatched Begin()/End() calls" do ImGui
+    pcall(imgui.End)
+    if not ok then ui_error('janela', err) end
+
+    -- se o jogador fechou a janela no X, mantem o estado em sincronia
     if ui.show and ui.show.v ~= state.ui_show then
         state.ui_show = ui.show.v and true or false
+    end
+end
+
+-- chamado pelo Moon ImGui a cada frame (de dentro do onD3DPresent da lib).
+-- O build_ui ja protege cada secao e sempre fecha a janela; este pcall e a
+-- ultima linha de defesa para nunca deixar o ImGui com Begin sem End.
+local function draw_ui_frame()
+    local ok, err = pcall(build_ui)
+    if not ok then
+        ui.error = tostring(err)
+        log('erro na interface: %s', tostring(err))
     end
 end
 
@@ -1998,7 +2251,13 @@ function save_config(silent)
             overlays = state.overlays,
             hud = state.hud,
             show_labels = state.show_labels,
-            show_ground = state.show_ground,
+            overlay_faces = state.overlay_faces,
+            overlay_pillars = state.overlay_pillars,
+            overlay_style = state.overlay_style,
+            overlay_max_zones = state.overlay_max_zones,
+            overlay_offset_x = state.overlay_offset_x,
+            overlay_offset_y = state.overlay_offset_y,
+            overlay_with_menu = state.overlay_with_menu,
             show_game_zones = state.show_game_zones,
             only_selected_overlay = state.only_selected_overlay,
             overlay_max_dist = state.overlay_max_dist,
@@ -2140,19 +2399,19 @@ local function update_player()
     state.player = nil
 end
 
-local function set_ui(show)
+function set_ui(show)
     show = show and true or false
     state.ui_show = show
     if ui.show then ui.show.v = show end
     if show then
         state.combo_was_down = true
-        printStyledString('[Cull Zone Creator] menu aberto - feche no X da janela', 1500, 4)
+        pcall(printStyledString, '[Cull Zone Creator] menu aberto - feche no X da janela', 1500, 4)
     else
-        printStyledString('[Cull Zone Creator] menu fechado - C + L abre de novo', 1500, 4)
+        pcall(printStyledString, '[Cull Zone Creator] menu fechado - C + L abre de novo', 1500, 4)
     end
 end
 
-local function toggle_ui()
+function toggle_ui()
     set_ui(not state.ui_show)
 end
 
@@ -2214,10 +2473,7 @@ function main()
     ui.import_path = ui.import_path or (EXPORT_DIR and join(EXPORT_DIR, 'cull.ipl') or nil)
     if ui.export_path then set_export_path(ui.export_path) end
 
-    imgui.OnDrawFrame = function()
-        local ok, err = pcall(build_ui)
-        if not ok then log('erro na interface: %s', tostring(err)) end
-    end
+    imgui.OnDrawFrame = draw_ui_frame
 
     addEventHandler('onD3DPresent', function()
         local ok, err = pcall(draw_present)
@@ -2341,7 +2597,23 @@ if _G.CZC_TEST_HOOK then
         build_ui = build_ui,
         ui = ui,
         new_zone_at_player = new_zone_at_player,
-        ui_actions = ui_actions,
+        draw_ui_frame = draw_ui_frame,
+        ui_child = ui_child,
+        ui_section = ui_section,
+        ui_page_bar = ui_page_bar,
+        ui_page_zones = ui_page_zones,
+        ui_page_export = ui_page_export,
+        ui_page_game = ui_page_game,
+        ui_page_config = ui_page_config,
+        ui_page_help = ui_page_help,
+        ui_header = ui_header,
+        ui_editor = ui_editor,
+        ui_list = ui_list,
+        ui_flags = ui_flags,
+        draw_zone_box = draw_zone_box,
+        camera_position = camera_position,
+        wall_faces_camera = wall_faces_camera,
+        PAGES = PAGES,
         key_name = key_name,
         key_held = key_held,
         key_just_pressed = key_just_pressed,

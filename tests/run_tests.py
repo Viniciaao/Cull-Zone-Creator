@@ -16,12 +16,18 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "moonloader", "CullZoneCreator.lua")
-TEST = os.path.join(ROOT, "tests", "test_czc.lua")
+TESTS = [os.path.join(ROOT, "tests", "test_czc.lua"),
+         os.path.join(ROOT, "tests", "test_ui_frames.lua")]
 
 
 def run_with_lua(binary):
     print(f"[run_tests] usando {binary}")
-    return subprocess.call([binary, TEST, SCRIPT], cwd=ROOT)
+    status = 0
+    for test in TESTS:
+        print(f"[run_tests] -> {os.path.basename(test)}")
+        code = subprocess.call([binary, test, SCRIPT], cwd=ROOT)
+        status = status or code
+    return status
 
 
 def run_with_lupa():
@@ -42,13 +48,16 @@ def run_with_lupa():
         return 1
     print("[run_tests] sintaxe OK (LuaJIT 2.1)")
 
-    test_source = open(TEST, encoding="utf-8", errors="replace").read()
-    try:
-        lua.execute("local src = ...; local f, err = loadfile(src); if not f then error(err, 0) end; f()", TEST)
-    except Exception as exc:
-        print("[run_tests] FALHOU:", exc)
-        return 1
-    return 0
+    status = 0
+    for test in TESTS:
+        print(f"[run_tests] -> {os.path.basename(test)}")
+        try:
+            lua.execute("local src = ...; local f, err = loadfile(src); if not f then error(err, 0) end; f()",
+                        test)
+        except Exception as exc:
+            print("[run_tests] FALHOU:", exc)
+            status = 1
+    return status
 
 
 def main():

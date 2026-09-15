@@ -162,6 +162,35 @@ exportação é experimental.
 
 ---
 
+## Overlay 3D (como as zonas aparecem)
+
+A zona é desenhada como um **sólido**, não como um cubo de arame:
+
+* os 8 vértices (4 embaixo, 4 em cima) são projetados na tela;
+* as faces viram quadrados preenchidos, desenhados **de trás para frente**
+  (ordem de pintura = profundidade) e com a opacidade caindo conforme a distância;
+* as **paredes voltadas para o lado oposto da câmera são descartadas**
+  (*backface culling*) — é isso que dá a sensação de volume e remove aquela
+  "ilusão de ótica" de linhas flutuando sem profundidade;
+* os anéis de baixo e de cima são reforçados com `renderDrawLine`, então a zona
+  continua legível de longe;
+* quando você está dentro da zona, a caixa fica **verde** e as faces viram
+  praticamente vidro (dá para ver o cenário através delas).
+
+Estilo (em **Config → Overlay 3D**):
+
+| Estilo | O que desenha |
+|---|---|
+| **Sólido** | faces só do lado de fora visível (recomendado, é o padrão) |
+| **Vidro** | as 6 faces sempre, bem transparentes (mostra a caixa inteira) |
+| **Só contorno** | nenhum preenchimento, apenas as arestas |
+
+Também dá para ligar/desligar: nomes, pilares nas quinas, "mostrar com o menu
+aberto" (por padrão o overlay **não** é desenhado enquanto o menu está aberto,
+para não sujar a tela), distância máxima, quantidade de zonas por frame e um
+**ajuste fino X/Y** em pixels caso a sua configuração de vídeo desloque o
+desenho.
+
 ## Live apply: como funciona
 
 As cull zones carregadas ficam em arrays do próprio motor (GTA SA 1.0 US):
@@ -190,13 +219,25 @@ Detalhes:
 ## Testes
 
 ```bash
-python3 tests/run_tests.py      # usa lua/luajit do PATH ou o modulo lupa
+python3 tests/run_tests.py      # roda os dois testes (usa lua/luajit ou o modulo lupa)
 ```
 
-Os testes montam um MoonLoader falso (com memória simulada nos endereços reais),
-carregam o script e verificam geometria, leitura/geração de IPL, save/load, a
-escrita do live apply (inclusive `Cm` em float), a leitura das zonas do jogo e a
-sequência de chamadas da GUI.
+São dois testes:
+
+* `tests/test_czc.lua` — lógica pura: geometria (incluindo o paralelogramo com
+  skew), leitura/geração de IPL, save/load, escrita do live apply (inclusive `Cm`
+  em float e coordenadas negativas) e a leitura das zonas do jogo;
+* `tests/test_ui_frames.lua` — interface: carrega o script com um **Moon ImGui
+  falso e estrito**, que mantém a pilha de janelas. Se sobrar um `Begin` sem
+  `End` (exatamente o que faz o jogo morrer com *"Mismatched Begin()/End()
+  calls"*), o teste falha. Ele também **simula cliques** nos botões e checa o
+  efeito no estado: criar várias zonas em sequência, apagar pelo `X` da lista e
+  pelo botão do editor, marcar flags, trocar de página, fechar o menu (no botão
+  e no `X`), erros em widgets e pontos atrás da câmera.
+
+  Ele inclui ainda uma checagem estática que reprova **função local usada antes
+  de ser declarada** — foi esse bug (o botão "Fechar menu" chamando uma função
+  ainda não declarada) que abortava o frame no meio e derrubava o ImGui.
 
 ## Limites / o que conferir no jogo
 
@@ -211,9 +252,12 @@ sair como esperado, comece por aqui:
 * **Live apply não muda nada**: veja se aparece "Memoria OK" no log
   (`moonloader.log`) — em jogo que não seja 1.0 US a memória é desligada e resta
   o IPL.
-* **Preenchimento da área torto**: desligue "Preencher área" nas Configurações
-  (o MoonAdditions recebe coordenadas em pixels; se a sua configuração de vídeo
-  mudar isso, as linhas continuam corretas).
+* **Preenchimento da área torto**: mude o estilo para "Só contorno" ou use o
+  ajuste fino X/Y (Config → Overlay 3D). As linhas continuam corretas de
+  qualquer forma.
+* **Se alguma função falhar**: cada pedaço da interface roda protegido, o `End()`
+  da janela é sempre chamado (é isso que evita o crash do ImGui) e o erro
+  aparece em vermelho no topo do menu, sem derrubar o resto.
 
 ## Créditos
 
